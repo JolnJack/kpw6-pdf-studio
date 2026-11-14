@@ -1,0 +1,33 @@
+# Python virtual environments & bytecode
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS & editor files
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+.idea/
+.vscode/
+
+# Build & bundle artifacts
+build/
+dist/
+*.dmg
+*.app/
+*.zip
+packaging/AppIcon.iconset/
+
+# Runtime data & personal PDFs
+uploads/
+outputs/
+samples/
+
+# Release packaging & seller assets (kept local only)
+xianyu_release/
+packaging/make_promo_and_docs.py
+packaging/assemble_release.py
+启动_KPW6_PDF优化工作台.command

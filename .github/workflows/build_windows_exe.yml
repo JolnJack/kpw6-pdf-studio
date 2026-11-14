@@ -1,0 +1,46 @@
+name: Build Windows Standalone EXE
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Generate icon
+        run: |
+          python packaging/make_icon.py
+      - name: Build Windows binary via PyInstaller
+        run: |
+          pyinstaller --noconfirm --clean --onedir --console `
+            --name "KindleKPW6Studio" `
+            --icon "packaging/app_icon.ico" `
+            --exclude-module onnxruntime `
+            --exclude-module pymupdf4llm `
+            --exclude-module pymupdf_layout `
+            --exclude-module tkinter `
+            --exclude-module matplotlib `
+            --exclude-module scipy `
+            app.py
+      - name: Prepare distribution zip
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/Release/KindleKPW6Studio
+          Copy-Item -Recurse dist/KindleKPW6Studio/* dist/Release/KindleKPW6Studio/
+          @"
+          @echo off
+          chcp 65001 >nul
+          start "" "%~dp0KindleKPW6Studio.exe"
+          "@ | Out-File -Encoding ascii dist/Release/双击启动_Kindle精排大师.bat
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KindleKPW6Studio-Win64
+          path: dist/Release
