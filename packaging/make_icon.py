@@ -6,16 +6,36 @@ from PIL import Image, ImageDraw, ImageFont
 
 def _load_cjk_font(size: int):
     for p in (
+        os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "msyh.ttc"),
+        os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "simsun.ttc"),
+        os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "simhei.ttf"),
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
         "/System/Library/Fonts/STHeiti Medium.ttc",
         "/System/Library/Fonts/PingFang.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
     ):
         if os.path.exists(p):
             try:
                 return ImageFont.truetype(p, size=size, index=0)
             except Exception:
                 continue
-    return ImageFont.load_default()
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError as exc:
+        raise RuntimeError("Generating icons without a system font requires Pillow >= 10.1") from exc
+
+
+def icon_labels(font):
+    """Use ASCII labels when the chosen system/default font lacks CJK glyphs."""
+    try:
+        missing = bytes(font.getmask(chr(0x10FFFF)))
+        has_cjk = all(bytes(font.getmask(char)) != missing for char in "双栏扫描精排")
+    except (UnicodeError, ValueError):
+        has_cjk = False
+    if has_cjk:
+        return "KPW6 · 300 PPI", "PDF 双栏 · 扫描精排"
+    return "KPW6 - 300 PPI", "PDF - CLEAN LAYOUT"
 
 
 def build_icons(out_dir: str):
@@ -47,7 +67,7 @@ def build_icons(out_dir: str):
     f_title = _load_cjk_font(33)
     bx0, by0, bx1, by1 = sx0 + 34, sy0 + 36, sx1 - 34, sy0 + 114
     draw.rounded_rectangle([bx0, by0, bx1, by1], radius=14, fill=(16, 185, 129, 255))
-    badge_txt = "KPW6 · 300 PPI"
+    badge_txt = icon_labels(f_badge)[0]
     bb = draw.textbbox((0, 0), badge_txt, font=f_badge)
     draw.text(
         ((bx0 + bx1 - (bb[2] - bb[0])) // 2, (by0 + by1 - (bb[3] - bb[1])) // 2 - bb[1]),
@@ -71,7 +91,7 @@ def build_icons(out_dir: str):
                 outline=(37, 99, 235, 230),
                 width=5,
             )
-            card_txt = "PDF 双栏 · 扫描精排"
+            card_txt = icon_labels(f_title)[1]
             cb = draw.textbbox((0, 0), card_txt, font=f_title)
             draw.text(
                 ((cx0 + cx1 - (cb[2] - cb[0])) // 2, (cy0 + cy1 - (cb[3] - cb[1])) // 2 - cb[1]),

@@ -1,6 +1,9 @@
 import argparse
+import atexit
+import math
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -10,23 +13,38 @@ import urllib.parse
 import uuid
 import webbrowser
 from dataclasses import replace
-import pymupdf as fitz
+
+if __name__ == "__main__":
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+
+if __name__ == "__main__" and "--pdf-worker" in sys.argv:
+    from pdf_worker import run_worker
+    run_worker()
+    raise SystemExit(0)
+
 from flask import Flask, request, jsonify, send_file, render_template_string
+from werkzeug.exceptions import HTTPException
 
 from pdf_engine import (
     ProcessOptions,
     get_target_page_list,
-    extract_book_meta,
-    build_kpw6_pdf,
-    build_kpw6_epub,
-    build_kpw6_cbz,
-    convert_epub_via_calibre,
-    render_preview_comparison,
-    render_hd_zoom_image,
-    detect_pdf_category,
-    scan_document_highlights,
 )
-from sample_generator import generate_demo_pdfs
+from pdf_service import PDF_SERVICE, worker_function
+from conversion_runner import cancel_all_conversions
+
+# The HTTP process only handles options, files and progress. Native document
+# objects never cross threads or process boundaries.
+generate_demo_pdfs = worker_function("generate_demo_pdfs")
+build_kpw6_pdf = worker_function("build_kpw6_pdf")
+build_kpw6_epub = worker_function("build_kpw6_epub")
+build_kpw6_cbz = worker_function("build_kpw6_cbz")
+convert_epub_via_calibre = worker_function("convert_epub_via_calibre")
+render_preview_comparison = worker_function("render_preview_comparison")
+render_hd_zoom_image = worker_function("render_hd_zoom_image")
+detect_pdf_category = worker_function("detect_pdf_category")
+scan_document_highlights = worker_function("scan_document_highlights")
 
 
 def _resolve_data_root() -> str:
@@ -72,9 +90,7 @@ for key, path in DEMO_PATHS.items():
 
 
 def _validate_pdf(pdf_path: str):
-    with fitz.open(pdf_path) as doc:
-        if not doc.is_pdf or doc.needs_pass or doc.page_count == 0:
-            raise ValueError("请选择有效、未加密且至少包含一页的 PDF。")
+    return PDF_SERVICE.call("validate_pdf", pdf_path)
 
 
 def _scan_uploads_dir():
@@ -723,10 +739,11 @@ HTML_PAGE = """<!DOCTYPE html>
     <span class="brand-badge">KPW6 签名版 · 五合一全能版</span>
     <div>
       <h1>Kindle PDF / 漫画 / 纯文字重排 & 去网格工作台</h1>
-      <p>免越狱 · 支持页码秒跳 / 图表直达 / KPW6 1:1 大屏仿真 / 点击高清放大镜 · 100% 兼容 Send to Kindle</p>
+      <p>免越狱 · 页码跳转 / 图表索引 / KPW6 版式预览 / 高清放大镜 · 支持导出 EPUB 供传书使用</p>
     </div>
   </div>
   <div class="header-actions">
+    <a class="btn" href="https://github.com/JolnJack/kpw6-pdf-studio" target="_blank" rel="noopener noreferrer">源码与许可 · AGPLv3</a>
     <button class="btn" onclick="openOutputFolder()">📂 打开导出目录</button>
     <a class="btn btn-primary" href="https://www.amazon.com/sendtokindle" target="_blank">☁️ 打开官方 Send to Kindle 网页</a>
   </div>
@@ -763,15 +780,15 @@ HTML_PAGE = """<!DOCTYPE html>
       <div class="mode-cards">
         <div class="mode-card active" id="card-academic_2col" onclick="selectMode('academic_2col')">
           <h4><span>📄 双栏学术论文</span><span style="color:#38bdf8;font-size:11.5px;">跨栏图表保护 + 旋转扶正</span></h4>
-          <p>自动锁定跨栏三线表、旋转 90° 图表自动扶正满屏，双栏正文放大约 2.5 倍。</p>
+          <p>识别跨栏表格与附图，支持旋转图表与双栏分屏；导出前可逐页预览并调整。</p>
         </div>
         <div class="mode-card" id="card-tech_book" onclick="selectMode('tech_book')">
-          <h4><span>📊 带图表的专业书</span><span style="color:#10b981;font-size:11.5px;">防切图护航</span></h4>
-          <p>切白边 + 去页眉页码；支持竖屏或横屏 2 倍大字模式，绝不切断表格与架构图。</p>
+          <h4><span>📊 带图表的专业书</span><span style="color:#10b981;font-size:11.5px;">图表版面保护</span></h4>
+          <p>裁切白边与页眉页脚，支持竖屏或横屏大字模式；复杂图表可手动设为整页保留。</p>
         </div>
         <div class="mode-card" id="card-scanned_book" onclick="selectMode('scanned_book')">
-          <h4><span>🔍 扫描版书籍</span><span style="color:#f59e0b;font-size:11.5px;">根治网格底纹</span></h4>
-          <p>将泛黄/浅灰底色漂白为纯白 #FFFFFF（消除 KPW6 棋盘格抖动底纹），加深文字。</p>
+          <h4><span>🔍 扫描版书籍</span><span style="color:#f59e0b;font-size:11.5px;">灰底与墨迹增强</span></h4>
+          <p>提亮泛黄或浅灰背景，并增强文字对比度；实际效果请结合原图与预览确认。</p>
         </div>
         <div class="mode-card" id="card-comic_manga" onclick="selectMode('comic_manga')">
           <h4><span>🎨 PDF 漫画 / 纯图画册</span><span style="color:#f43f5e;font-size:11.5px;">双页拆切+满屏</span></h4>
@@ -797,7 +814,7 @@ HTML_PAGE = """<!DOCTYPE html>
             <input type="checkbox" id="optTrimHeader" checked onchange="refreshPreview()">
           </label>
           <label class="checkbox-row" style="margin-bottom:6px;">
-            <span>横屏 2 倍大字模式 (单栏/宽表神器)</span>
+            <span>横屏大字模式 (适合单栏/宽表)</span>
             <input type="checkbox" id="optLandscape" onchange="refreshPreview()">
           </label>
           <label class="checkbox-row" style="margin-bottom:6px;">
@@ -869,7 +886,7 @@ HTML_PAGE = """<!DOCTYPE html>
           <div class="seg-row">
             <button type="button" class="seg-btn" id="dpi-300" onclick="setDpiPreset(300)">300 PPI<br><span style="font-size:9.5px;opacity:0.8;">标准轻巧</span></button>
             <button type="button" class="seg-btn active" id="dpi-450" onclick="setDpiPreset(450)">450 PPI<br><span style="font-size:9.5px;opacity:0.9;">1.5x超清推荐</span></button>
-            <button type="button" class="seg-btn" id="dpi-600" onclick="setDpiPreset(600)">600 PPI<br><span style="font-size:9.5px;opacity:0.85;">2.0x印刷极限</span></button>
+            <button type="button" class="seg-btn" id="dpi-600" onclick="setDpiPreset(600)">600 PPI<br><span style="font-size:9.5px;opacity:0.85;">2.0x超采样</span></button>
           </div>
         </div>
 
@@ -891,8 +908,8 @@ HTML_PAGE = """<!DOCTYPE html>
           <input type="range" id="optSharpen" min="0.0" max="2.5" step="0.1" value="1.6" onchange="document.getElementById('valSharpen').innerText=parseFloat(this.value).toFixed(1)+'x'; refreshPreview()">
         </div>
 
-        <label class="checkbox-row" style="margin-top:2px;border-top:1px solid rgba(255,255,255,0.07);padding-top:6px;" title="勾选后：纯电子版 PDF（无加粗需求时）直接保留 100% 原始矢量字库与公式路径，无限放大零失真">
-          <span>原生矢量无损直通 (电子版无限放大)</span>
+        <label class="checkbox-row" style="margin-top:2px;border-top:1px solid rgba(255,255,255,0.07);padding-top:6px;" title="在适用的 PDF 页面上保留矢量文字与公式路径；图像增强、加粗等选项可能需要栅格化">
+          <span>保留原生矢量内容 (适用时)</span>
           <input type="checkbox" id="optVectorLossless" checked onchange="refreshPreview()">
         </label>
       </div>
@@ -943,7 +960,7 @@ HTML_PAGE = """<!DOCTYPE html>
           </div>
           <div class="seg-row" style="grid-template-columns: repeat(3, 1fr);">
             <button type="button" class="seg-btn active-emerald" id="fmt-epub_layout" onclick="setExportFormat('epub_layout')">.EPUB 精排<br><span style="font-size:9px;opacity:0.88;">云传有封面★</span></button>
-            <button type="button" class="seg-btn" id="fmt-pdf" onclick="setExportFormat('pdf')">.PDF 专享<br><span style="font-size:9px;opacity:0.85;">矢量无损</span></button>
+            <button type="button" class="seg-btn" id="fmt-pdf" onclick="setExportFormat('pdf')">.PDF 专享<br><span style="font-size:9px;opacity:0.85;">矢量优先</span></button>
             <button type="button" class="seg-btn" id="fmt-azw3" onclick="setExportFormat('azw3')">.AZW3 原生<br><span style="font-size:9px;opacity:0.85;">USB直传★</span></button>
             <button type="button" class="seg-btn" id="fmt-epub_reflow" onclick="setExportFormat('epub_reflow')">.EPUB 流式<br><span style="font-size:9px;opacity:0.85;">可调字号</span></button>
             <button type="button" class="seg-btn" id="fmt-mobi" onclick="setExportFormat('mobi')">.MOBI 经典<br><span style="font-size:9px;opacity:0.85;">旧版兼容</span></button>
@@ -951,7 +968,7 @@ HTML_PAGE = """<!DOCTYPE html>
           </div>
         </div>
         <div id="formatHintText" style="font-size:10.5px;color:#cbd5e1;line-height:1.4;background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.28);padding:6px 8px;border-radius:6px;margin-top:2px;">
-          ✨ <strong>Send to Kindle 官方无线传书首选：</strong>100% 锁定双栏放大、表格与附图版面，且传到 KPW6 后<strong>自动显示书架封面与锁屏封面</strong>，内置图表跳转目录。
+          ✨ <strong>图像版 EPUB：</strong>保留生成的分屏图像，内置封面与图表目录。可尝试通过 Send to Kindle 传书；设备上的版式与封面显示请实际确认。
         </div>
 
         <div style="border-top:1px solid rgba(255,255,255,0.08);padding-top:7px;margin-top:3px;display:flex;flex-direction:column;gap:6px;">
@@ -990,10 +1007,10 @@ HTML_PAGE = """<!DOCTYPE html>
 
     <div style="display:flex;flex-direction:column;gap:7px;">
       <button class="btn btn-emerald" style="padding:11px;font-size:13px;justify-content:center;" id="mainExportBtn" onclick="exportSelectedFormat()">
-        🚀 一键导出【.EPUB 满屏精排带封面版】
+        🚀 一键导出【.EPUB 满屏精排版】
       </button>
       <button class="btn btn-purple" style="padding:8px;font-size:11.5px;justify-content:center;" id="bundleExportBtn" onclick="exportSelectedFormat('bundle_both')">
-        ⚡ 同时生成【.PDF 矢量版 + .EPUB 带封面版】双文件
+        ⚡ 同时生成【.PDF 矢量版 + .EPUB 版】双文件
       </button>
     </div>
   </aside>
@@ -1021,7 +1038,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
         <a class="btn btn-primary" id="viewPdfOnlineLink" href="#" target="_blank" style="display:none;">👁️ 在浏览器新标签页通览整本成品 PDF</a>
         <a class="btn btn-emerald" id="downloadLink" href="#" download>💾 下载主文件到本地</a>
-        <a class="btn btn-purple" id="downloadSecondLink" href="#" download style="display:none;">💾 下载配套 EPUB (带封面)</a>
+        <a class="btn btn-purple" id="downloadSecondLink" href="#" download style="display:none;">💾 下载配套 EPUB</a>
         <div id="volumeDownloadsContainer" style="display:none;gap:6px;flex-wrap:wrap;"></div>
         <button class="btn" onclick="openOutputFolder()">📂 打开输出文件夹</button>
       </div>
@@ -1057,7 +1074,7 @@ HTML_PAGE = """<!DOCTYPE html>
           <div class="stat-badge">识别区块：<strong id="statSlices">-</strong> 个</div>
           <div class="stat-badge">生成屏幕：<strong id="statScreens">-</strong> 屏</div>
           <div class="stat-badge">字号放大：<strong id="statZoom">-</strong> 倍</div>
-          <div class="stat-badge" title="当前画质档位与笔画加粗状态">画质引擎：<strong id="statQualityMode" style="color:#6ee7b7;">450 PPI · 矢量直通</strong></div>
+          <div class="stat-badge" title="当前画质档位与笔画加粗状态">画质引擎：<strong id="statQualityMode" style="color:#6ee7b7;">450 PPI · 矢量优先</strong></div>
         </div>
       </div>
 
@@ -1085,6 +1102,7 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <div class="preview-grid">
+      <div id="previewErrorNotice" role="alert" style="display:none;grid-column:1/-1;padding:12px 16px;border:1px solid #ef4444;border-radius:10px;background:rgba(239,68,68,0.12);color:#fecaca;"></div>
       <!-- Left: Source PDF with Interactive Slice Hotspots -->
       <div class="preview-card">
         <div class="preview-card-header">
@@ -1113,14 +1131,14 @@ HTML_PAGE = """<!DOCTYPE html>
       <div class="preview-card">
         <div class="preview-card-header">
           <div>
-            <h3>KPW6 签名版 (7 英寸 1264×1680) 实机预览</h3>
+            <h3>KPW6 签名版 (7 英寸 1264×1680) 目标版式预览</h3>
           </div>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <div class="view-tabs">
-              <button class="view-tab active" id="tabSingleView" onclick="setRightViewMode('single')">📱 单屏 1:1 大图精看</button>
+              <button class="view-tab active" id="tabSingleView" onclick="setRightViewMode('single')">📱 单屏大图精看</button>
               <button class="view-tab" id="tabGridView" onclick="setRightViewMode('grid')">🪟 本页多屏平铺</button>
             </div>
-            <button class="btn btn-sm" onclick="zoomCurrentKpw6Screen()">🔍 600-PPI 超清放大镜</button>
+            <button class="btn btn-sm" onclick="zoomCurrentKpw6Screen()">🔍 高清放大镜</button>
           </div>
         </div>
 
@@ -1143,11 +1161,11 @@ HTML_PAGE = """<!DOCTYPE html>
 
           <div class="kpw6-large-bezel" id="singleKpw6Bezel">
             <img id="singleKpw6Img" src="" alt="KPW6 1:1 Screen"
-                 title="点击启动 600 PPI 无损超清放大镜 (2160×2871 px)"
+                 title="点击加载更高分辨率的预览图层"
                  onclick="zoomCurrentKpw6Screen()">
           </div>
           <p style="font-size:11.5px;color:var(--muted);text-align:center;">
-            💡 提示：支持键盘 <strong>← / →</strong> 逐屏翻阅（翻完本页最后一屏自动进入下一页），点击屏幕图像将启动 <strong>600 PPI 原生重采样放大镜 (2160×2871)</strong>，放大绝不模糊。
+            💡 提示：支持键盘 <strong>← / →</strong> 逐屏翻阅（翻完本页最后一屏自动进入下一页）。点击屏幕可加载更高分辨率图层；扫描源的细节仍受原始图像清晰度限制。
           </p>
         </div>
 
@@ -1166,7 +1184,7 @@ HTML_PAGE = """<!DOCTYPE html>
   <div class="lightbox-header">
     <div>
       <strong id="lightboxTitle" style="font-size:14px;">🔍 高清细节放大镜</strong>
-      <span id="lightboxHdBadge" style="margin-left:10px;font-size:11.5px;padding:3px 8px;border-radius:999px;background:rgba(16,185,129,0.2);color:#6ee7b7;border:1px solid #10b981;">✨ 正在实时重采样 600 PPI 超清图层...</span>
+      <span id="lightboxHdBadge" style="margin-left:10px;font-size:11.5px;padding:3px 8px;border-radius:999px;background:rgba(16,185,129,0.2);color:#6ee7b7;border:1px solid #10b981;">✨ 正在加载高清图层...</span>
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
       <button class="btn btn-sm" onclick="setLightboxZoom(920)">1.0x 适合窗口</button>
@@ -1202,6 +1220,8 @@ let currentSplitVolumesEvery = 0;
 let pageOverridesByFile = {};
 let previewRequestSerial = 0;
 let fileSelectionSerial = 0;
+let coverUploadSerial = 0;
+let lightboxRequestSerial = 0;
 
 const ALL_MODES = ["academic_2col", "tech_book", "scanned_book", "comic_manga", "pure_text"];
 
@@ -1356,11 +1376,13 @@ function selectMode(mode, skipRefresh = false) {
 }
 
 async function fetchUploadedFilesAndInit() {
+  const selectionId = fileSelectionSerial;
   const res = await fetch("/api/files");
   const data = await res.json();
+  if (selectionId !== fileSelectionSerial) return;
   renderUploadedPills(data.uploaded || []);
 
-  // If user has an uploaded PDF (e.g. lemmon2006.pdf), auto-open the latest uploaded PDF so they don't have to re-upload!
+  // Auto-open history only while no newer user selection has taken place.
   if (data.uploaded && data.uploaded.length > 0) {
     const latest = data.uploaded[0];
     await switchToUploadedFile(latest.file_id, latest.name);
@@ -1526,7 +1548,7 @@ function setDpiPreset(dpi) {
   const labels = {
     300: "300 PPI (标准轻巧)",
     450: "450 PPI (1.5x 超清)",
-    600: "600 PPI (2.0x 极限)"
+    600: "600 PPI (2.0x 超采样)"
   };
   document.getElementById("valDpiPreset").innerText = labels[dpi] || (dpi + " PPI");
   updateQualityBadgeText();
@@ -1560,7 +1582,7 @@ function updateQualityBadgeText() {
   if (currentMode === "scanned_book" || currentMode === "comic_manga" || enh || currentStrokeBoldness > 0 || rmWm || deskew || !vec) {
     modeDesc += ` 超清精修${boldText}${extraTags ? "·" + extraTags : ""}`;
   } else {
-    modeDesc += ` · 矢量无损`;
+    modeDesc += ` · 矢量优先`;
   }
   const el = document.getElementById("statQualityMode");
   if (el) el.innerText = modeDesc;
@@ -1589,17 +1611,27 @@ function setCoverMode(mode) {
 
 async function handleCoverUpload(file) {
   if (!file) return;
+  const uploadId = ++coverUploadSerial;
   const statusEl = document.getElementById("coverUploadStatus");
   statusEl.innerText = "⏳ 正在上传封面图...";
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch("/api/upload_cover", { method: "POST", body: form });
-  const data = await res.json();
-  if (data.cover_id) {
+  try {
+    const res = await fetch("/api/upload_cover", { method: "POST", body: form });
+    const data = await res.json();
+    if (uploadId !== coverUploadSerial) return;
+    if (!res.ok || data.error || !data.cover_id) {
+      throw new Error(data.error || "无法读取封面图片，请选择完整的图片文件。");
+    }
     currentCustomCoverId = data.cover_id;
     statusEl.innerText = "✅ 已加载自定义封面：" + data.filename;
     if (currentPage !== 0) jumpToPage(0);
     else refreshPreview(0);
+  } catch (err) {
+    if (uploadId !== coverUploadSerial) return;
+    statusEl.innerText = "❌ 上传失败：" + (err.message || "请重试");
+  } finally {
+    if (uploadId === coverUploadSerial) document.getElementById("coverFileInput").value = "";
   }
 }
 
@@ -1641,11 +1673,33 @@ function getOptionsPayload() {
   };
 }
 
+function clearPreviewAfterError(message) {
+  currentScreens = [];
+  currentSlicesMeta = [];
+  currentScreenIdx = 0;
+  currentHasCoverScreen = false;
+  document.getElementById("sourcePreviewImg").src = "";
+  document.getElementById("singleKpw6Img").src = "";
+  document.getElementById("sliceHotspotsLayer").innerHTML = "";
+  document.getElementById("screenSelectorPills").innerHTML = "";
+  document.getElementById("kpw6ScreensContainer").innerHTML = "";
+  document.getElementById("singleKpw6Bezel").style.display = "none";
+  document.getElementById("skipPageNotice").style.display = "none";
+  ["statSlices", "statScreens", "statZoom"].forEach(id => {
+    document.getElementById(id).innerText = "-";
+  });
+  const notice = document.getElementById("previewErrorNotice");
+  notice.innerText = "预览失败：" + message;
+  notice.style.display = "block";
+}
+
 async function refreshPreview(targetScreenIdx = 0) {
   const requestId = ++previewRequestSerial;
+  const requestedFileId = currentFileId;
   const badge = document.getElementById("loadingBadge");
   badge.style.display = "block";
   badge.innerText = `⏳ 正在渲染第 ${currentPage + 1} 页预览...`;
+  document.getElementById("previewErrorNotice").style.display = "none";
 
   try {
     const payload = getOptionsPayload();
@@ -1656,7 +1710,7 @@ async function refreshPreview(targetScreenIdx = 0) {
     });
     const data = await res.json();
     if (requestId !== previewRequestSerial || payload.file_id !== currentFileId) return;
-    if (data.error) return;
+    if (!res.ok || data.error) throw new Error(data.error || "无法生成预览，请重试。");
 
     currentPage = data.page_num;
     totalPages = data.total_pages;
@@ -1713,7 +1767,7 @@ async function refreshPreview(targetScreenIdx = 0) {
       div.innerHTML = `
         <div class="screen-label">
           <strong>KPW6 第 ${i + 1} / ${currentScreens.length} 屏</strong>
-          <span style="font-size:11px;color:#38bdf8;cursor:pointer;" onclick="openLightbox(currentScreens[${i}], '第 ${currentPage+1} 页 · KPW6 第 ${i+1} 屏', 'kpw6', ${i})">🔍 600-PPI 放大</span>
+          <span style="font-size:11px;color:#38bdf8;cursor:pointer;" onclick="openLightbox(currentScreens[${i}], '第 ${currentPage+1} 页 · KPW6 第 ${i+1} 屏', 'kpw6', ${i})">🔍 高清放大</span>
         </div>
         <img src="${b64}" alt="KPW6 Screen ${i+1}" onclick="openLightbox(currentScreens[${i}], '第 ${currentPage+1} 页 · KPW6 第 ${i+1} 屏', 'kpw6', ${i})">
       `;
@@ -1727,6 +1781,9 @@ async function refreshPreview(targetScreenIdx = 0) {
         : Math.max(0, Math.min(currentScreens.length - 1, targetScreenIdx));
       selectKpw6Screen(safeIdx, false);
     }
+  } catch (err) {
+    if (requestId !== previewRequestSerial || requestedFileId !== currentFileId) return;
+    clearPreviewAfterError(err.message || "无法生成预览，请重试。");
   } finally {
     if (requestId === previewRequestSerial) badge.style.display = "none";
   }
@@ -1831,11 +1888,12 @@ function zoomCurrentKpw6Screen() {
 
 async function openLightbox(src, title, targetType = "kpw6", screenIdx = 0) {
   if (!src) return;
+  const requestId = ++lightboxRequestSerial;
   const imgEl = document.getElementById("lightboxImg");
   const badgeEl = document.getElementById("lightboxHdBadge");
   imgEl.src = src;
   document.getElementById("lightboxTitle").innerText = "🔍 " + (title || "高清细节放大镜");
-  badgeEl.innerText = "⏳ 正在实时重采样 600 PPI 无损超清图层...";
+  badgeEl.innerText = "⏳ 正在加载高清图层...";
   badgeEl.style.background = "rgba(59,130,246,0.2)";
   badgeEl.style.color = "#93c5fd";
   badgeEl.style.borderColor = "#3b82f6";
@@ -1853,21 +1911,23 @@ async function openLightbox(src, title, targetType = "kpw6", screenIdx = 0) {
       body: JSON.stringify(payload),
     });
     const data = await res.json();
-    if (data.hd_image && document.getElementById("lightboxModal").style.display === "flex") {
+    if (requestId !== lightboxRequestSerial || document.getElementById("lightboxModal").style.display !== "flex") return;
+    if (!res.ok || data.error) throw new Error(data.error || "高清图层暂不可用");
+    if (data.hd_image) {
       imgEl.src = data.hd_image;
-      badgeEl.innerText = `✨ 已加载 600 PPI 原生超清图层 (${data.width}×${data.height} px · 放大零失真)`;
+      badgeEl.innerText = `✨ 已加载高清图层 (${data.width}×${data.height} px)`;
       badgeEl.style.background = "rgba(16,185,129,0.2)";
       badgeEl.style.color = "#6ee7b7";
       badgeEl.style.borderColor = "#10b981";
-    } else if (data.error) {
-      badgeEl.innerText = data.error;
     }
   } catch (err) {
-    badgeEl.innerText = "1264×1680 实机原生分辨率";
+    if (requestId !== lightboxRequestSerial || document.getElementById("lightboxModal").style.display !== "flex") return;
+    badgeEl.innerText = "高清图层暂不可用，当前显示预览图";
   }
 }
 
 function closeLightbox() {
+  ++lightboxRequestSerial;
   document.getElementById("lightboxModal").style.display = "none";
 }
 
@@ -1878,13 +1938,13 @@ function setLightboxZoom(pxWidth) {
 const FORMAT_META = {
   "epub_layout": {
     short: ".EPUB (版面精排+封面)",
-    btn: "🚀 一键导出【.EPUB 满屏精排带封面版】(推荐传 Send to Kindle)",
-    hint: "✨ <strong>Send to Kindle 官方无线传书首选：</strong>100% 锁定双栏放大、表格与附图版面，且传到 KPW6 后<strong>自动点亮书架封面与锁屏封面</strong>，内置图表跳转目录。"
+    btn: "🚀 一键导出【.EPUB 满屏精排版】(推荐传 Send to Kindle)",
+    hint: "✨ <strong>图像版 EPUB：</strong>保留生成的分屏图像，内置封面与图表目录。可尝试通过 Send to Kindle 传书；设备上的版式与封面显示请实际确认。"
   },
   "pdf": {
-    short: ".PDF (矢量无损版)",
-    btn: "🚀 一键导出【.PDF 专享重排矢量版】(含独立首页封面)",
-    hint: "📄 <strong>原生矢量 PDF 格式：</strong>体积最小（论文仅 ~4MB）、公式与字库无限放大零失真，第 1 页含独立封面。注：Kindle 系统对 .pdf 不显示书架外封面，需点开第 1 页查看。"
+    short: ".PDF (矢量优先版)",
+    btn: "🚀 一键导出【.PDF 重排版】(封面由当前设置决定)",
+    hint: "📄 <strong>PDF 格式：</strong>在适用页面上保留矢量文字与公式，启用图像增强时可能栅格化。文件大小取决于输入与处理选项，独立封面由当前设置决定。"
   },
   "azw3": {
     short: ".AZW3 (Kindle KF8 原生)",
@@ -1894,7 +1954,7 @@ const FORMAT_META = {
   "epub_reflow": {
     short: ".EPUB (流式可调字号)",
     btn: "🚀 一键导出【.EPUB 流式可调字号版】(纯文字小说/长文推荐)",
-    hint: "📖 <strong>纯文字重排电子书：</strong>自动提取正文、合并断句并生成章节目录，传至 KPW6 后可自由缩放字号、切换宋体/Bookerly 字体、长按查词典，同样带书架与锁屏封面。"
+    hint: "📖 <strong>纯文字重排电子书：</strong>提取正文、合并断句并生成章节目录。流式文字可在支持的阅读器中调整字号，字体、词典和封面显示取决于阅读器。"
   },
   "mobi": {
     short: ".MOBI (经典 Kindle 格式)",
@@ -1902,8 +1962,8 @@ const FORMAT_META = {
     hint: "📚 <strong>经典 .MOBI 格式：</strong>调用本机 Calibre 引擎打包为经典 MOBI 电子书格式，兼容旧款 Kindle 与各类本地阅读器管理软件。"
   },
   "cbz": {
-    short: ".CBZ (1264×1680 无损漫画包)",
-    btn: "🚀 一键导出【.CBZ 1264×1680 无损高清漫画/图集包】",
+    short: ".CBZ (1264×1680 PNG 漫画包)",
+    btn: "🚀 一键导出【.CBZ 1264×1680 PNG 漫画/图集包】",
     hint: "🎨 <strong>标准漫画归档包 (.cbz)：</strong>将生成的 1264×1680 封面与所有重排屏幕以无损 PNG 封装并附带 <code>ComicInfo.xml</code>，适合漫画阅读器或 KCC 二次处理。"
   }
 };
@@ -2021,7 +2081,7 @@ async function exportSelectedFormat(overrideFormat = null) {
 
       if (data.second_download_url) {
         dl2.href = data.second_download_url;
-        dl2.innerText = data.second_download_label || "💾 下载配套 EPUB (带封面)";
+        dl2.innerText = data.second_download_label || "💾 下载配套 EPUB";
         dl2.style.display = "inline-flex";
       } else {
         dl2.style.display = "none";
@@ -2064,6 +2124,28 @@ EXPORT_JOBS = {}
 
 
 def _parse_options(data: dict) -> ProcessOptions:
+    if not isinstance(data, dict):
+        raise ValueError("请求参数必须是 JSON 对象。")
+    if data.get("mode", "academic_2col") not in ("academic_2col", "tech_book", "scanned_book", "comic_manga", "pure_text"):
+        raise ValueError("请选择支持的文档处理模式。")
+    numeric_ranges = {
+        "gamma_strength": (0.1, 3.0), "margin_Percent": (0.0, 20.0),
+        "reflow_font_size": (9.0, 24.0), "line_spacing": (1.0, 3.0),
+        "sharpen_strength": (0.0, 3.0), "dpi_preset": (300.0, 600.0),
+        "stroke_boldness": (0.0, 3.0), "split_volumes_every": (0.0, 10000.0),
+    }
+    for name, (lower, upper) in numeric_ranges.items():
+        if name in data:
+            try:
+                value = float(data[name])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"参数 {name} 必须是有效数字。") from exc
+            if not math.isfinite(value) or not lower <= value <= upper:
+                raise ValueError(f"参数 {name} 必须在 {lower:g}–{upper:g} 之间。")
+            if name in {"dpi_preset", "stroke_boldness", "split_volumes_every"} and not value.is_integer():
+                raise ValueError(f"参数 {name} 必须是整数。")
+    if data.get("cover_mode", "smart_card") not in ("smart_card", "first_page", "custom_image", "none"):
+        raise ValueError("请选择支持的封面模式。")
     cov_id = data.get("custom_cover_id", "")
     cov_path = CUSTOM_COVERS.get(cov_id) if cov_id else None
     raw_start = data.get("start_page", 1)
@@ -2081,6 +2163,10 @@ def _parse_options(data: dict) -> ProcessOptions:
             end_page = None
 
     raw_overrides = data.get("page_overrides") or {}
+    if not isinstance(raw_overrides, dict):
+        raise ValueError("单页规则必须是 JSON 对象。")
+    if any(value not in ("auto", "whole_portrait", "whole_landscape", "skip", None, "") for value in raw_overrides.values()):
+        raise ValueError("单页规则包含不支持的选项。")
     clean_overrides = {str(k): str(v) for k, v in raw_overrides.items() if v and str(v) != "auto"}
 
     return ProcessOptions(
@@ -2112,6 +2198,29 @@ def _parse_options(data: dict) -> ProcessOptions:
         split_volumes_every=int(data.get("split_volumes_every", 0) or 0),
         page_overrides=clean_overrides,
     )
+
+
+@app.before_request
+def _validate_json_request():
+    if request.is_json and not isinstance(request.get_json(), dict):
+        return jsonify({"error": "请求参数必须是 JSON 对象。"}), 400
+
+
+@app.errorhandler(ValueError)
+def _option_error(error):
+    return jsonify({"error": str(error)}), 400
+
+
+@app.errorhandler(RuntimeError)
+def _processing_error(error):
+    return jsonify({"error": str(error)}), 500
+
+
+@app.errorhandler(HTTPException)
+def _http_error(error):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": error.description}), error.code
+    return error
 
 
 def _get_uploaded_list():
@@ -2286,7 +2395,16 @@ def api_upload_cover():
     cid = str(uuid.uuid4())[:8]
     safe_name = _clean_upload_filename(f.filename, "cover.jpg")
     save_path = os.path.join(UPLOAD_DIR, f"cover_{cid}_{safe_name}")
-    f.save(save_path)
+    temp_path = os.path.join(UPLOAD_DIR, f".cover_{uuid.uuid4().hex}.part")
+    try:
+        f.save(temp_path)
+        PDF_SERVICE.call("validate_cover", temp_path)
+        os.replace(temp_path, save_path)
+    except Exception:
+        return jsonify({"error": "无法读取封面图片，请确认图片完整且尺寸未超过限制。"}), 400
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
     CUSTOM_COVERS[cid] = save_path
     return jsonify({"cover_id": cid, "filename": safe_name})
 
@@ -2331,6 +2449,8 @@ def _export_single_volume(
 ) -> dict:
     """Build one volume (or the whole book) in the requested format and return download metadata."""
     export_id, export_dir = _new_export_directory()
+    cover_tag = "带封面" if vol_opts.cover_mode != "none" else ""
+    cover_detail = "含封面与目录" if cover_tag else "含目录，不添加独立封面"
     if export_fmt == "pdf":
         out_filename = f"{base_name}_KPW6_{mode_tag}{vol_suffix}.pdf"
         out_path = os.path.join(export_dir, out_filename)
@@ -2346,21 +2466,21 @@ def _export_single_volume(
 
     if export_fmt in ("epub_layout", "epub_reflow"):
         is_reflow = (export_fmt == "epub_reflow")
-        sub_tag = "流式可调字号带封面" if is_reflow else f"{mode_tag}带封面"
+        sub_tag = f"流式可调字号{cover_tag}" if is_reflow else f"{mode_tag}{cover_tag}"
         out_filename = f"{base_name}_KPW6_{sub_tag}{vol_suffix}.epub"
         out_path = os.path.join(export_dir, out_filename)
         stats = build_kpw6_epub(pdf_path, out_path, vol_opts, force_reflow=is_reflow, progress_cb=progress_cb)
         detail = (
             f"识别 {stats['chapters_count']} 章 / {stats['paragraphs_count']} 段"
             if is_reflow
-            else f"含 1264×1680 封面 + {stats['screens_count']} 屏无损内页 + {stats['chapters_count']} 条目录"
+            else f"{stats['screens_count']} 屏内页 + {stats['chapters_count']} 条目录" + ("，含独立封面" if cover_tag else "，不添加独立封面")
         )
         return {
             **stats,
             "output_filename": out_filename,
             "download_url": _dl_url(f"{export_id}/{out_filename}"),
-            "download_label": f"💾 下载{vol_suffix or '带封面'} .EPUB ({stats['output_size_mb']} MB)",
-            "message": f"✅ 已生成带封面 EPUB：{out_filename} （{detail}，体积 {stats['output_size_mb']} MB · 传 Send to Kindle 即可显示封面）",
+            "download_label": f"💾 下载{vol_suffix or cover_tag} .EPUB ({stats['output_size_mb']} MB)",
+            "message": f"✅ 已生成 EPUB：{out_filename} （{detail}，体积 {stats['output_size_mb']} MB · 设备与云传效果请在实际 Kindle 上确认）",
         }
 
     if export_fmt in ("azw3", "mobi"):
@@ -2376,8 +2496,8 @@ def _export_single_volume(
                 progress_cb=_scaled_progress_cb(progress_cb, 0, 85),
             )
             if progress_cb:
-                progress_cb(86, 100, f"正在调用 Calibre 引擎编译 .{ext.upper()} (含封面与目录)...")
-            out_filename = f"{base_name}_KPW6_{mode_tag}带封面{vol_suffix}.{ext}"
+                progress_cb(86, 100, f"正在调用 Calibre 引擎编译 .{ext.upper()} ({cover_detail})...")
+            out_filename = f"{base_name}_KPW6_{mode_tag}{cover_tag}{vol_suffix}.{ext}"
             out_path = os.path.join(export_dir, out_filename)
             conv_stats = convert_epub_via_calibre(
                 temp_epub,
@@ -2397,7 +2517,7 @@ def _export_single_volume(
             "output_filename": out_filename,
             "download_url": _dl_url(f"{export_id}/{out_filename}"),
             "download_label": f"💾 下载{vol_suffix or ''} .{ext.upper()} ({conv_stats['output_size_mb']} MB)",
-            "message": f"✅ 已生成 Kindle 原生 .{ext.upper()}：{out_filename} （含内置封面与目录，体积 {conv_stats['output_size_mb']} MB）",
+            "message": f"✅ 已生成 .{ext.upper()}：{out_filename} （{cover_detail}，体积 {conv_stats['output_size_mb']} MB）",
         }
 
     if export_fmt == "cbz":
@@ -2409,7 +2529,7 @@ def _export_single_volume(
             "output_filename": out_filename,
             "download_url": _dl_url(f"{export_id}/{out_filename}"),
             "download_label": f"💾 下载{vol_suffix or ''} .CBZ ({stats['output_size_mb']} MB)",
-            "message": f"✅ 已生成 1264×1680 无损图集包：{out_filename} （含封面 + {stats['screens_count']} 屏，体积 {stats['output_size_mb']} MB）",
+            "message": f"✅ 已生成 PNG 图集包：{out_filename} （{stats['screens_count']} 屏{' + 独立封面' if cover_tag else ''}，体积 {stats['output_size_mb']} MB）",
         }
 
     if export_fmt == "bundle_both":
@@ -2422,7 +2542,7 @@ def _export_single_volume(
             progress_cb=_scaled_progress_cb(progress_cb, 0, 35),
         )
 
-        epub_filename = f"{base_name}_KPW6_{mode_tag}带封面{vol_suffix}.epub"
+        epub_filename = f"{base_name}_KPW6_{mode_tag}{cover_tag}{vol_suffix}.epub"
         epub_path_out = os.path.join(export_dir, epub_filename)
         epub_stats = build_kpw6_epub(
             pdf_path,
@@ -2434,12 +2554,12 @@ def _export_single_volume(
         return {
             "output_filename": f"{pdf_filename} & {epub_filename}",
             "download_url": _dl_url(f"{export_id}/{epub_filename}"),
-            "download_label": f"💾 下载{vol_suffix or '带封面'} .EPUB ({epub_stats['output_size_mb']} MB)",
+            "download_label": f"💾 下载{vol_suffix or cover_tag} .EPUB ({epub_stats['output_size_mb']} MB)",
             "second_download_url": _dl_url(f"{export_id}/{pdf_filename}"),
             "second_download_label": f"💾 下载{vol_suffix or '矢量'} .PDF ({pdf_stats['output_size_mb']} MB)",
             "view_url": _view_url(f"{export_id}/{pdf_filename}"),
             "output_size_mb": round(epub_stats["output_size_mb"] + pdf_stats["output_size_mb"], 2),
-            "message": f"✅ 双格式同时生成完毕！EPUB ({epub_stats['output_size_mb']} MB，带书架封面) + PDF ({pdf_stats['output_size_mb']} MB，矢量无损)",
+            "message": f"✅ 双格式生成完毕：EPUB ({epub_stats['output_size_mb']} MB) + PDF ({pdf_stats['output_size_mb']} MB，按设置优先保留矢量)",
         }
 
     raise ValueError(f"未知导出格式: {export_fmt}")
@@ -2479,10 +2599,9 @@ def api_export_unified():
     }
 
     try:
-        doc = fitz.open(pdf_path)
-        total_doc_pages = len(doc)
-        detected_title, _ = extract_book_meta(doc, pdf_path, opts)
-        doc.close()
+        document_info = PDF_SERVICE.call("inspect_pdf", pdf_path, opts)
+        total_doc_pages = document_info["total_pages"]
+        detected_title = document_info["title"]
 
         target_pages = get_target_page_list(total_doc_pages, opts)
         if not target_pages:
@@ -2573,7 +2692,7 @@ def api_export_unified():
             "elapsed_sec": elapsed_total,
             "message": (
                 f"✅ 大书自动分卷完成！共导出 {num_vols} 卷（每卷 {chunk_size} 页，合计 {total_selected} 页，"
-                f"总计 {total_mb} MB，耗时 {elapsed_total}s · 每卷均自带独立书架封面）"
+                f"总计 {total_mb} MB，耗时 {elapsed_total}s）"
             ),
         })
     except ValueError as ve:
@@ -2645,6 +2764,12 @@ def api_open_folder():
 
 
 def _find_available_port(preferred: int = 8765) -> int:
+    if not 0 <= preferred <= 65535:
+        raise ValueError("端口必须在0–65535之间。")
+    if preferred == 0:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
     for candidate in [preferred, *range(8766, 8820)]:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as chk:
             if chk.connect_ex(("127.0.0.1", candidate)) == 0:
@@ -2674,7 +2799,20 @@ def _open_browser_when_ready(url: str, port: int):
         time.sleep(0.2)
 
 
+def _shutdown_owned_processes(*_):
+    PDF_SERVICE.close()
+    cancel_all_conversions()
+
+
+atexit.register(_shutdown_owned_processes)
+
+
 if __name__ == "__main__":
+    def _exit_signal(signum, frame):
+        _shutdown_owned_processes()
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, _exit_signal)
+    signal.signal(signal.SIGINT, _exit_signal)
     parser = argparse.ArgumentParser(description="KPW6 PDF Studio")
     parser.add_argument("--port", type=int, default=int(os.environ.get("KPW6_PORT", "8765")))
     parser.add_argument("--no-browser", action="store_true")

@@ -1,16 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
+import sys
 
+project_root = Path(SPECPATH)
+sys.path.insert(0, str(project_root / 'packaging'))
+from release_support import FROZEN_EXCLUDES, write_release_metadata
 
 a = Analysis(
-    ['app.py'],
-    pathex=[],
+    [str(project_root / 'app.py')],
+    pathex=[str(project_root)],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=['pdf_service', 'pdf_worker', 'conversion_runner'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['onnxruntime', 'pymupdf4llm', 'pymupdf_layout', 'networkx', 'yaml', 'tkinter', 'matplotlib', 'scipy'],
+    excludes=list(FROZEN_EXCLUDES),
     noarchive=False,
     optimize=0,
 )
@@ -42,3 +47,4 @@ coll = COLLECT(
     upx_exclude=[],
     name='KPW6StudioServer',
 )
+write_release_metadata(project_root, Path(DISTPATH) / 'KPW6StudioServer')

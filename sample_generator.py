@@ -23,6 +23,19 @@ def generate_demo_pdfs(out_dir: str) -> dict:
     return paths
 
 
+def _insert_flowing_textbox(page, rect, text, *, fontsize, fontname):
+    """Measure at the real font/width before placing a complete demo paragraph."""
+    probe_height = 10000.0
+    probe = page.new_shape()
+    spare = probe.insert_textbox(fitz.Rect(rect.x0, rect.y0, rect.x1, rect.y0 + probe_height),
+                                text, fontsize=fontsize, fontname=fontname)
+    height = max(rect.height, probe_height - spare + 1.0)
+    actual = fitz.Rect(rect.x0, rect.y0, rect.x1, rect.y0 + height)
+    if page.insert_textbox(actual, text, fontsize=fontsize, fontname=fontname) < 0:
+        raise RuntimeError("Demo paragraph overflowed its measured text box")
+    return height
+
+
 def _make_academic_2col(path: str) -> None:
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
@@ -70,11 +83,11 @@ def _make_academic_2col(path: str) -> None:
     y_cur = 214
     for txt, fsize in left_paragraphs:
         h_box = 22 if fsize > 9.5 else 68
-        if "(1)" in txt:
+        if txt.startswith("E(x, y)"):
             h_box = 26
         r = fitz.Rect(65, y_cur, 282, y_cur + h_box)
-        page.insert_textbox(r, txt, fontsize=fsize, fontname="times-roman")
-        y_cur += h_box + 8
+        height = _insert_flowing_textbox(page, r, txt, fontsize=fsize, fontname="times-roman")
+        y_cur += height + 8
 
     right_paragraphs = [
         ("III. DE-DITHERING FOR CARTA 1300", 10.0),
@@ -102,8 +115,8 @@ def _make_academic_2col(path: str) -> None:
     for txt, fsize in right_paragraphs:
         h_box = 22 if fsize > 9.5 else 72
         r = fitz.Rect(312, y_cur, 530, y_cur + h_box)
-        page.insert_textbox(r, txt, fontsize=fsize, fontname="times-roman")
-        y_cur += h_box + 8
+        height = _insert_flowing_textbox(page, r, txt, fontsize=fsize, fontname="times-roman")
+        y_cur += height + 8
 
     fig_box = fitz.Rect(65, 595, 530, 755)
     page.draw_rect(fig_box, color=(0.2, 0.35, 0.6), width=1.2)

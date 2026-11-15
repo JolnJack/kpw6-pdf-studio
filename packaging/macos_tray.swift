@@ -1,10 +1,57 @@
 import Cocoa
 import Foundation
 
+struct ServerHealth {
+    let outputDirectoryURL: URL
+}
+
+private struct ServerHealthPayload: Decodable {
+    let ok: Bool
+    let output_dir: String
+}
+
+func decodeServerHealth(_ data: Data) -> ServerHealth? {
+    guard let payload = try? JSONDecoder().decode(ServerHealthPayload.self, from: data),
+          payload.ok, (payload.output_dir as NSString).isAbsolutePath else { return nil }
+    return ServerHealth(outputDirectoryURL: URL(fileURLWithPath: payload.output_dir, isDirectory: true).standardizedFileURL)
+}
+
+private final class HealthResponseBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: ServerHealth?
+    func store(_ health: ServerHealth?) {
+        lock.lock()
+        defer { lock.unlock() }
+        value = health
+    }
+    func read() -> ServerHealth? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+@discardableResult
+func stopServerProcess(_ proc: Process, gracePeriod: TimeInterval = 5.0, killWait: TimeInterval = 1.0) -> Bool {
+    guard proc.isRunning else { return true }
+    proc.terminate()
+    let gracefulDeadline = Date().addingTimeInterval(gracePeriod)
+    while proc.isRunning && Date() < gracefulDeadline { Thread.sleep(forTimeInterval: 0.02) }
+    if proc.isRunning {
+        kill(proc.processIdentifier, SIGKILL)
+        let killDeadline = Date().addingTimeInterval(killWait)
+        while proc.isRunning && Date() < killDeadline { Thread.sleep(forTimeInterval: 0.02) }
+    }
+    return !proc.isRunning
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var serverProcess: Process?
-    var boundPort: Int = 8765
+    var boundPort: Int?
+    var outputDirectoryURL: URL?
+    var portFile: String?
+    var isQuitting = false
     var openedInitial = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -18,12 +65,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if let proc = serverProcess, proc.isRunning {
-            proc.terminate()
-            DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) {
-                if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
-            }
-        }
+        isQuitting = true
+        if let proc = serverProcess { stopServerProcess(proc) }
+        if let path = portFile { try? FileManager.default.removeItem(atPath: path) }
     }
 
     func setupStatusBar() {
@@ -36,10 +80,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         let openItem = NSMenuItem(title: "🌐 打开 Kindle 精排工作台", action: #selector(openWorkspace), keyEquivalent: "o")
         openItem.target = self
+        openItem.isEnabled = boundPort != nil
         menu.addItem(openItem)
 
-        let dirItem = NSMenuItem(title: "📂 打开导出文件夹 (Documents/KPW6_PDF_Studio)", action: #selector(openOutputDir), keyEquivalent: "d")
+        let dirItem = NSMenuItem(title: "📂 打开导出文件夹", action: #selector(openOutputDir), keyEquivalent: "d")
         dirItem.target = self
+        dirItem.isEnabled = outputDirectoryURL != nil
         menu.addItem(dirItem)
 
         menu.addItem(NSMenuItem.separator())
@@ -64,6 +110,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let portFile = (NSTemporaryDirectory() as NSString).appendingPathComponent("kpw6_port_\(getpid()).txt")
+        self.portFile = portFile
         try? fm.removeItem(atPath: portFile)
 
         let proc = Process()
@@ -99,9 +146,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if let raw = try? String(contentsOfFile: portFile, encoding: .utf8),
                    let p = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
                    p > 0 {
-                    if self.checkServerHealth(port: p) {
+                    if let health = self.checkServerHealth(port: p) {
                         DispatchQueue.main.async {
+                            guard !self.isQuitting else { return }
                             self.boundPort = p
+                            self.outputDirectoryURL = health.outputDirectoryURL
                             self.rebuildMenu(status: "运行中 · http://127.0.0.1:\(p)")
                             if !self.openedInitial {
                                 self.openedInitial = true
@@ -120,34 +169,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func checkServerHealth(port: Int) -> Bool {
-        guard let url = URL(string: "http://127.0.0.1:\(port)/api/health") else { return false }
+    func checkServerHealth(port: Int) -> ServerHealth? {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/api/health") else { return nil }
         let sem = DispatchSemaphore(value: 0)
-        var ok = false
+        let result = HealthResponseBox()
         let cfg = URLSessionConfiguration.ephemeral
         cfg.connectionProxyDictionary = [:]
         let session = URLSession(configuration: cfg)
+        defer { session.invalidateAndCancel() }
         let req = URLRequest(url: url, timeoutInterval: 1.0)
-        session.dataTask(with: req) { _, resp, _ in
-            if let http = resp as? HTTPURLResponse, http.statusCode == 200 {
-                ok = true
+        session.dataTask(with: req) { data, resp, _ in
+            if let data = data, let http = resp as? HTTPURLResponse, http.statusCode == 200 {
+                result.store(decodeServerHealth(data))
             }
             sem.signal()
         }.resume()
-        _ = sem.wait(timeout: .now() + 1.2)
-        return ok
+        guard sem.wait(timeout: .now() + 1.2) == .success else { return nil }
+        return result.read()
     }
 
     @objc func openWorkspace() {
-        if let url = URL(string: "http://127.0.0.1:\(boundPort)") {
+        if let port = boundPort, let url = URL(string: "http://127.0.0.1:\(port)") {
             NSWorkspace.shared.open(url)
         }
     }
 
     @objc func openOutputDir() {
-        let outDir = (NSHomeDirectory() as NSString).appendingPathComponent("Documents/KPW6_PDF_Studio/outputs")
-        try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
-        NSWorkspace.shared.open(URL(fileURLWithPath: outDir))
+        guard let directory = outputDirectoryURL else { return }
+        NSWorkspace.shared.open(directory)
     }
 
     @objc func quitApp() {

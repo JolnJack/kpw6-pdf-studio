@@ -1,114 +1,113 @@
-# KPW6 PDF Studio — Kindle PDF / 学术论文 / 扫描古籍 / 漫画精排工作台
+# KPW6 PDF Studio
 
-面向 **Kindle Paperwhite 6（7 英寸 · 300 PPI · Carta 1300，兼容其他主流 Kindle 与墨水屏设备）** 设计的本地离线 Web 精排工具。专治在 7 寸墨水屏看原生 PDF 时常见的**字体过小、双栏分屏阅读困难、跨栏公式/三线表被腰斩、扫描书灰底棋盘纹、以及 Send to Kindle 无书架/锁屏封面**等问题。
+面向 Kindle Paperwhite 6 与类似墨水屏设备的本地 PDF 排版工作台。支持双栏论文、图表书、扫描件、漫画和纯文字文档；处理在本机执行，输入文件不会被改写。
 
----
+## 处理与导出
 
-## 核心特性
+- **双栏论文**：分析通栏与左右栏，分屏放大；按文字方向处理侧向图表。
+- **图表书**：裁剪空白、分析切分位置，支持单页强制保留和横置。
+- **扫描件**：背景处理、墨迹加深、笔画加粗、锐化和小角度纠偏。
+- **漫画**：跨页拆分、左右阅读顺序与页边距设置。
+- **纯文字**：跨行/跨页拼接、中文及英文章节识别，导出流式 EPUB 或重新排版的 PDF。
+- 导出 **PDF、版面 EPUB、流式 EPUB、CBZ**，可同时生成 PDF 与 EPUB。
+- **AZW3/MOBI** 需要另行安装 [Calibre](https://calibre-ebook.com/)，安装包不包含 Calibre。
+- 支持页码范围、跳过页面、分卷和图表索引。每次导出使用独立目录，同名输入或重复导出不会覆盖旧结果。
 
-### 1. 五大专属文档重排引擎
-上传 PDF 后自动检测版面特征并推荐模式，同时内置 5 类合成测试样张可供开箱体验：
-- **双栏学术论文（`academic_2col`）**：自动拆分为「左栏 ➜ 右栏」单栏大字重排，保护跨栏三线表/附图不被切断，横排旋转 `90°` 的大图表自动扶正满屏。
-- **带图表的专业书（`tech_book`）**：裁切多余白边、自动剔除页眉与页码，保留完整代码与架构图表（支持矢量无损直通及横屏 2 倍大字模式）。
-- **扫描版书籍（`scanned_book`）**：Carta 1300 去网格漂白与黑度增强、自动切除书脊装订黑边与打孔阴影、剥离浅灰水印噪点、扫描歪斜自动扶正（Deskew）。
-- **PDF 漫画 / 纯图画册（`comic_manga`）**：自动识别横版跨页从中缝拆分为两屏，支持日漫「从右 ➜ 左」阅读顺序与超窄白边满屏显示。
-- **纯文字 PDF 书籍（`pure_text`）**：剔除页眉页码、合并断行、识别章节目录，可生成原生可自由调字号的流式 `.epub`。
+PDF 分析和重排包含启发式判断。请用左右预览校对正文、公式、图表、方向和阅读顺序；必要时使用强制整页、关闭自动页眉页脚处理或调整参数。模糊印刷连字符会保留，明确的软连字符可合并，避免擅自改变正文词义。
 
-### 2. 六种电子书输出与封面点亮
-- **`.EPUB`（版面精排 + 封面）**：100% 锁定精排分屏版面与图表保护，内置封面图像与 OPF/NCX 图表跳转目录，上传官方 **Send to Kindle** 后可显示书架封面与锁屏封面（无需 Calibre）。
-- **`.PDF`（专享矢量无损版）**：保留矢量文字与高清排版，体积紧凑。
-- **`.EPUB`（流式可调字号）**：纯文字重排，支持在 Kindle 上自由切换字体与字号。
-- **`.CBZ`（无损漫画图集包）**：适合漫画与纯图画册阅读器。
-- **`.AZW3` / `.MOBI`**（需本机额外安装开源软件 [Calibre](https://calibre-ebook.com/) 以调用 `ebook-convert`）。
-- 支持「`.PDF` 矢量版 + `.EPUB` 带封面版」双文件一键同步导出、页码区间截取，以及按 `50 / 100 / 150 页/卷` 自动分卷（轻松满足 Send to Kindle 单文件 200 MB 上限）。
+原生 PDF 的可见批注及已填写表单会烘焙到内存副本中以保留外观；生成的阅读文件不保留原表单的可编辑性或原有数字签名效力。PDF 通道优先保留矢量，扫描件及显式增强选项使用图像路径。原始文件始终保留。
 
-### 3. 可视化交互校对
-- 左右同屏实时对比：左侧标记「通栏/大图、左栏、右栏、旋转扶正」区块，点击编号直接跳转右侧对应屏幕。
-- **600 PPI 点击放大镜**：支持单屏 1:1 精看、本页多屏平铺与局部 600 PPI 超清放大校验。
-- 全书 `Table` / `Figure` 自动索引跳转条 + 单页强制微调（跟随后端自动 / 强制整页竖屏 / 横置 90° 满屏 / 导出跳过此页）。
-- **100% 本地离线处理**：所有 PDF 仅在本地运行，不上传任何第三方服务器。
+“无封面”会省略独立封面。流式 EPUB 中标记为强制整页/横置的页面以图像保留版面，前后正文仍可调整字号。
 
----
+设备显示、Send to Kindle 转换、书架/锁屏封面和具体固件兼容性需要在实际设备上确认。按页数分卷不等于文件大小保证；云传前请检查每卷大小。
 
-## 快速本地运行（macOS / Windows / Linux）
+## 本地运行
 
-需要 **Python 3.10+**，建议在虚拟环境中安装依赖：
+需要 Python 3.10 或更新版本。推荐单独虚拟环境：
 
 ```bash
 git clone https://github.com/JolnJack/kpw6-pdf-studio.git
 cd kpw6-pdf-studio
-
 python3 -m venv .venv
-# macOS / Linux:
+# macOS / Linux
 source .venv/bin/activate
-# Windows (CMD):
-# .venv\Scripts\activate.bat
-
-pip install -r requirements.txt
+# Windows CMD 使用 .venv\Scripts\activate.bat
+python -m pip install -r requirements.txt
 python app.py
 ```
 
-启动后将自动寻找可用端口（默认 `http://127.0.0.1:8765`）并打开浏览器工作台。
+启动后打开本机浏览器。服务只监听 `127.0.0.1`，默认从端口 8765 开始寻找空闲端口。
 
-### 常用启动参数与环境变量
-- `--port <端口号>`：指定监听端口（默认从 `8765` 起自动探测可用端口）。
-- `--no-browser`（或设置环境变量 `KPW6_NO_BROWSER=1`）：仅启动后台服务，不自动弹开浏览器。
-- `--port-file <路径>`：将实际绑定端口写入文件，供桌面启动器读取。
-- `KPW6_DATA_DIR=<路径>`：自定义 `uploads/` 与 `outputs/` 数据根目录（PyInstaller 打包状态下默认写入 `~/Documents/KPW6_PDF_Studio`）。
+- `--port <端口>`：指定首选端口；`0` 自动选择空闲端口。
+- `--no-browser` 或 `KPW6_NO_BROWSER=1`：不自动打开浏览器。
+- `--port-file <路径>`：写入实际监听端口，供桌面启动器使用。
+- `KPW6_DATA_DIR=<路径>`：自定义数据目录；包含 `uploads/`、`outputs/` 和演示样张。
+- 源码运行默认使用项目目录；冻结应用默认使用 `~/Documents/KPW6_PDF_Studio`，目录创建失败时尝试 `~/.kpw6_pdf_studio`。
 
-### 导出与文件校验
-- 每组导出结果保存在 `outputs/<独立标识>/`，重复导出或上传同名 PDF 都不会覆盖旧结果，已有下载链接继续有效。
-- 起始页超出文档页数、结束页早于起始页时会明确报错；结束页超过末页时按实际末页截取。
-- 流式 EPUB 中设置为「强制整页竖屏 / 横置 90°」的页面以图像保留版面，前后正文仍可自由调整字号。
-- 上传会先校验 PDF，损坏或需要密码的文件不会进入历史列表。旧版本遗留的损坏文件会被忽略，原文件仍保留在磁盘上。
-- 旋转页会在内存中统一坐标并保留原裁切范围，原始 PDF 不会被改写。依赖 `PyMuPDF >= 1.26.4` 的 [页面旋转规范化接口](https://pymupdf.readthedocs.io/en/latest/page.html#Page.remove_rotation)。
+上传的 PDF 会先校验；损坏、需要密码或空文档不会进入历史列表。自定义封面会完整解码校验，最多2500万像素。旧版本遗留损坏 PDF 会被忽略而不删除。上传和导出文件保留在本地，可从对应目录手动管理。
 
-### 回归测试
-安装依赖后，在项目目录运行：
+HTTP 线程不直接调用 MuPDF。文档操作由一个独立子进程的主线程依次执行；进度查询仍可响应。退出会清理 PDF 子进程和本应用启动的转换器；处理进程意外退出后，可在下一次请求中重建。
+
+## 回归验证
 
 ```bash
+python -m pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
-# 前端异步请求测试需要 Node.js（应用本身无需 Node.js）：
-node --test tests/preview_race.test.cjs
+# 仅测试前端状态需要 Node.js；应用本身无需 Node.js
+node --test tests/preview_race.test.cjs tests/frontend_release.test.cjs
 ```
 
-测试使用临时目录；已安装 Calibre 时还会验证 AZW3 / MOBI 转换，否则跳过这项可选测试。
+测试使用临时合成文件。已安装 Calibre 时会验证实际 AZW3/MOBI 转换，否则跳过该可选项。CI 在 Windows、macOS、Linux 的 Python 3.10/3.12 上运行回归。
 
----
+正式校验 EPUB 可使用 [EPUBCheck](https://github.com/w3c/epubcheck/releases)。打包后的 HTTP/独立处理进程验证：
 
-## 打包为独立桌面应用
-
-### 1. GitHub Actions 云端构建 Windows 独立 EXE
-仓库内置 [.github/workflows/build_windows_exe.yml](.github/workflows/build_windows_exe.yml)，推送至 GitHub 后在 **`Actions -> Build Windows Standalone EXE -> Run workflow`** 手动触发，即可在云端生成免 Python 环境的 `KindleKPW6Studio-Win64` 构建产物。
-
-### 2. macOS 本地构建 `.app`（Apple Silicon / 本地环境）
 ```bash
-# 1. 生成应用图标 (.png / .ico / .icns)
+python packaging/smoke_frozen.py <后端可执行文件路径>
+```
+
+## 构建 Windows 应用
+
+Windows 上安装开发依赖后：
+
+```bash
 python packaging/make_icon.py
-
-# 2. 使用 PyInstaller 构建独立后端服务
-pip install pyinstaller
-pyinstaller --noconfirm --clean KPW6StudioServer.spec
-
-# 3. 编译原生 Cocoa 菜单栏启动器（配合 .app 目录结构使用）
-swiftc -O packaging/macos_tray.swift -o KPW6StudioLauncher -framework Cocoa
+python packaging/build_windows.py
 ```
 
----
+默认输出 `dist/Release/`，保持目录完整，双击其中的启动 BAT。脚本指向 `KindleKPW6Studio/KindleKPW6Studio.exe`，依赖位于同一子目录。
 
-## 项目结构
+也可在 GitHub **Actions → Build Windows Standalone EXE → Run workflow** 构建。工作流先运行测试，再装配、实际启动冻结 EXE 并通过 HTTP 校验预览及 PDF/EPUB/CBZ 导出，最后提供构建产物。这些产物不是自动发布的正式 Release。
 
-```text
-kpw6-pdf-studio/
-├── app.py                              # Flask 本地工作台、前端界面与 API 路由
-├── pdf_engine.py                       # 版面切分、扫描去污纠偏、EPUB/PDF/CBZ 导出引擎
-├── sample_generator.py                 # 5 类内置演示样张生成器
-├── requirements.txt                    # 核心 Python 依赖 (Flask / PyMuPDF / Pillow / NumPy)
-├── KPW6StudioServer.spec               # PyInstaller 打包配置
-├── packaging/
-│   ├── make_icon.py                    # 图标生成脚本 (.png / .ico / .icns)
-│   ├── macos_tray.swift                # macOS AppKit 状态栏启动器
-│   ├── icon_1024.png / app_icon.ico / AppIcon.icns
-└── .github/workflows/
-    └── build_windows_exe.yml           # Windows PyInstaller 云端打包工作流
+## 构建 macOS 应用
+
+在目标架构的 Mac 上安装开发依赖：
+
+```bash
+python packaging/make_icon.py
+python packaging/build_macos.py
 ```
+
+默认输出 `dist/macos/KPW6-PDF-Studio-<架构>.zip`，内含完整的 `KPW6 PDF Studio.app`。脚本在本地临时目录装配 `Info.plist`、Cocoa 启动器、完整后端依赖、图标、对应源码及许可证，完成 ad-hoc 签名，并再次解压校验签名。最低系统版本依据实际 Python/依赖 wheel 的部署要求生成。
+
+建议解压到本地目录使用；部分同步目录会附加 Finder 元数据，影响应用签名校验。ZIP不携带这些扩展属性。
+
+可用 `--work-dir` 与 `--output-dir` 指定隔离构建目录；输出目标应为空。Intel 与 Apple Silicon 应分别在相应环境构建和验收。
+
+**本地 ad-hoc 签名不等于 Developer ID 签名或 Apple 公证。** 面向外部用户分发前，仍需完成相应签名、公证、首次启动和退出验收；本项目不要求用户关闭系统安全功能。
+
+## 许可与对应源码
+
+项目所有者已选择 **AGPL-3.0-only** 开源分发，全文见 [LICENSE](LICENSE)。第三方组件保留各自许可，说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+构建脚本随包提供：
+
+- `LICENSE`：项目许可全文。
+- `SOURCE.zip` 与 `SOURCE_CODE.md`：本次构建使用的项目源码和获取说明。
+- `THIRD_PARTY_LICENSES/`：实际打包依赖 wheel 中的版权、许可和供应商告知材料，以及 Python 许可。
+- `RELEASE_MANIFEST.json`：源码哈希、基线提交、工作区状态、依赖版本和许可文件清单。
+
+冻结配方排除不使用的可选布局/ML组件及其私有依赖，不将它们列为已打包运行组件。改变配方、依赖或分发方式后，应重新检查实际安装包的材料。开发工作区未提交时，清单会明确标记，不能把基线提交当成本次源码快照。
+
+## 发布验收边界
+
+自动测试和本地构建不能替代设备与平台验收。发布前请确认实际 Windows 包、macOS 完整应用、对应架构/系统版本、退出清理，以及目标 Kindle/Send to Kindle 行为。已知修复与验收证据见仓库测试和构建工作流；不作“任何 PDF 都不会出错”的保证。

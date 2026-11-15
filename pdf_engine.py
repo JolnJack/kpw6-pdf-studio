@@ -5,10 +5,10 @@ import math
 import os
 import re
 import shutil
-import subprocess
 import uuid
 import zipfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import List, Tuple, Optional, Dict, Any, Callable
 
 import pymupdf as fitz  # PyMuPDF
@@ -32,7 +32,7 @@ class SliceBox:
     rect: fitz.Rect  # in source PDF coordinates
     kind: str = "body"  # "full", "col_left", "col_right", "body", "manga_r", "manga_l", "figure_rot"
     out_page_idx: int = 0
-    rotate: int = 0  # 0 or -90 (270) for restoring sideways figures to upright portrait
+    rotate: int = 0  # 0 or +/-90 for restoring sideways figures to upright portrait
 
 
 @dataclass
@@ -110,6 +110,10 @@ def _open_source_pdf(pdf_path: str) -> fitz.Document:
     """
     doc = fitz.open(pdf_path)
     try:
+        # Flatten visible appearances into this in-memory document before any
+        # clipping/rotation. show_pdf_page() does not copy annotations or fields.
+        # bake() retains their vector appearances; the input file is never saved.
+        doc.bake(annots=True, widgets=True)
         for page in doc:
             if page.rotation:
                 # remove_rotation() works on MediaBox coordinates. Temporarily
@@ -420,7 +424,7 @@ def _analyze_rotated_sideways_page(
     Detect if a page consists predominantly of 90-degree rotated sideways figures or tables
     (e.g. full-page landscape tables like Table 9, or stacked sideways graphs like Figures 1-45).
     - If stacked sideways figures (separated by a clear horizontal blank gap near middle of page):
-      Splits each figure cleanly and sets rotate=-90 so each figure stands 100% UPRIGHT and
+      Splits each figure and chooses the rotation direction from its native text so it
       fills the entire KPW6 portrait screen!
     - If a full-page sideways table:
       Keeps the entire table 100% intact on a single KPW6 screen without chopping rows or columns.
@@ -429,6 +433,7 @@ def _analyze_rotated_sideways_page(
     d = page.get_text("dict")
     rot_chars = 0
     horiz_chars = 0
+    downward_chars = 0
     for b in d.get("blocks", []):
         if b.get("type") != 0:
             continue
@@ -443,11 +448,14 @@ def _analyze_rotated_sideways_page(
             dx, dy = l.get("dir", (1.0, 0.0))
             if abs(dy) > 0.5:
                 rot_chars += len(txt)
+                if dy > 0:
+                    downward_chars += len(txt)
             else:
                 horiz_chars += len(txt)
 
     if rot_chars <= horiz_chars or rot_chars < 15:
         return None
+    upright_rotation = 90 if downward_chars > rot_chars / 2 else -90
 
     h_px, w_px = ink.shape
     bx0, by0, bx1, by1 = bbox
@@ -497,7 +505,7 @@ def _analyze_rotated_sideways_page(
                         page.rect.x0 + px1 / sx,
                         page.rect.y0 + py1 / sy,
                     )
-                    slices_out.append(SliceBox(page_num=page_num, rect=r, kind="figure_rot", out_page_idx=out_idx, rotate=-90))
+                    slices_out.append(SliceBox(page_num=page_num, rect=r, kind="figure_rot", out_page_idx=out_idx, rotate=upright_rotation))
                 return slices_out
 
     # Otherwise it is a single sideways figure or full-page sideways table (e.g. Table 9 on Pages 9-25)
@@ -509,8 +517,8 @@ def _analyze_rotated_sideways_page(
         page.rect.x0 + px1 / sx,
         page.rect.y0 + py1 / sy,
     )
-    # If it is a wide single sideways figure (width > height * 1.15), rotate=-90 so it fills the portrait KPW6 screen upright!
-    rot_angle = -90 if (bw > bh * 1.15) else 0
+    # Turn a wide sideways figure in the direction indicated by its native text.
+    rot_angle = upright_rotation if (bw > bh * 1.15) else 0
     kind_tag = "figure_rot" if rot_angle != 0 else "full"
     return [SliceBox(page_num=page_num, rect=r, kind=kind_tag, out_page_idx=0, rotate=rot_angle)]
 
@@ -973,7 +981,7 @@ def enhance_eink_image(
         white_clip = max(210.0, white_clip)
         black_clip = min(45.0, black_clip)
         norm = np.clip((arr - black_clip) / max(10.0, white_clip - black_clip), 0.0, 1.0)
-        curved = np.power(norm, max(0.65, gamma))
+        curved = np.power(norm, 1.0 / max(0.65, gamma))
     else:
         bg_level = float(np.percentile(arr, bleach_percentile * 100.0))
         white_factor = 0.82 if remove_watermark else 0.94
@@ -992,7 +1000,8 @@ def enhance_eink_image(
             black_clip = 35.0
 
         norm = np.clip((arr - black_clip) / (white_clip - black_clip), 0.0, 1.0)
-        curved = np.power(norm, gamma)
+        # norm is luminance (0 black / 1 white): an exponent >1 darkens it.
+        curved = np.power(norm, 1.0 / max(0.1, gamma))
 
     # Remove light-gray watermark remnants & isolated single-pixel scan dust speckles
     if remove_watermark and not is_comic:
@@ -1074,7 +1083,7 @@ def enhance_eink_image(
 # ==============================================================================
 
 CHAPTER_REGEX = re.compile(
-    r"^\s*(第[一二三四五六七八九十百千万零0-9]+[章节回篇卷部集]|Chapter\s+\d+|CHAPTER\s+[IVXLC\d]+|序言|前言|引言|楔子|尾声|后记|附录)\b",
+    r"^\s*(第[一二三四五六七八九十百千万零0-9]+[章节回篇卷部集]|Chapter\s+(?:\d+|[IVXLC]+)\b|序言|前言|引言|楔子|尾声|后记|附录)",
     re.IGNORECASE,
 )
 PAGE_NUM_REGEX = re.compile(r"^\s*[-—–~·•]*\s*(?:Page\s*)?\d+\s*[-—–~·•]*\s*$", re.IGNORECASE)
@@ -1089,6 +1098,63 @@ class ExtractedParagraph:
     bbox: Optional[fitz.Rect] = None
 
 
+def _running_margin_exclusions(doc: fitz.Document) -> Dict[int, set]:
+    """Conservatively identify isolated, repeated running text and page numbers.
+
+    Margin position alone is not evidence: continuous body lines in these bands
+    are retained. Non-numeric running text must repeat on at least two pages.
+    Cache once per in-memory source document, not once per page extraction.
+    """
+    cached = getattr(doc, "_kpw6_margin_exclusions", None)
+    if cached is not None:
+        return cached
+    candidates = []
+    occurrences: Dict[Tuple[str, str], set] = {}
+    for pno, page in enumerate(doc):
+        lines = []
+        for block in page.get_text("dict").get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                txt = " ".join("".join(s.get("text", "") for s in line.get("spans", [])).split())
+                if txt:
+                    size = max((s.get("size", 11) for s in line.get("spans", [])), default=11)
+                    lines.append((txt, fitz.Rect(line["bbox"]), size))
+        for txt, rect, size in lines:
+            band = "top" if rect.y1 < page.rect.height * .12 else ("bottom" if rect.y0 > page.rect.height * .88 else "")
+            if not band:
+                continue
+            gaps = [(other.y0 - rect.y1) if band == "top" else (rect.y0 - other.y1)
+                    for _, other, _ in lines
+                    if (other.y0 >= rect.y1 if band == "top" else other.y1 <= rect.y0)]
+            if not gaps or min(gaps) < max(8.0, size * .9):
+                continue
+            key = (band, txt)
+            occurrences.setdefault(key, set()).add(pno)
+            candidates.append((pno, key))
+    excluded: Dict[int, set] = {}
+    for pno, key in candidates:
+        if PAGE_NUM_REGEX.fullmatch(key[1]) or len(occurrences[key]) >= 2:
+            excluded.setdefault(pno, set()).add(key)
+    doc._kpw6_margin_exclusions = excluded
+    return excluded
+
+
+def _join_wrapped_text(left: str, right: str) -> str:
+    """Join line/page wraps without guessing whether a printed hyphen is soft."""
+    if not left or not right:
+        return left + right
+    if left.endswith("\u00ad"):
+        return left[:-1] + right  # Explicit discretionary hyphen only.
+    if left.endswith("-"):
+        return left + right  # Retain ambiguous printed/hard hyphens.
+    if left[-1].isascii() and right[0].isascii():
+        if left[-1] in "([{" or right[0] in ",.!?;:)]}":
+            return left + right
+        return left + " " + right
+    return left + right
+
+
 def extract_structured_text_from_page(page: fitz.Page, pno: int, trim_hf: bool = True) -> List[ExtractedParagraph]:
     """
     Extract lines from a single PDF page, filter out running headers/footers/page numbers,
@@ -1101,6 +1167,7 @@ def extract_structured_text_from_page(page: fitz.Page, pno: int, trim_hf: bool =
 
     raw_lines: List[Dict[str, Any]] = []
     font_sizes: List[float] = []
+    exclusions = _running_margin_exclusions(page.parent).get(page.number, set()) if trim_hf else set()
 
     for b in blocks:
         if b.get("type") != 0:
@@ -1113,13 +1180,10 @@ def extract_structured_text_from_page(page: fitz.Page, pno: int, trim_hf: bool =
                 continue
             max_sz = max((float(s.get("size", 11.0)) for s in spans), default=11.0)
 
-            # Filter running header (top 8%) and running footer / page number (bottom 8.5%)
+            # Remove only isolated, evidenced running text; never a fixed band.
             if trim_hf:
-                if lbbox.y1 < h * 0.085 and max_sz < 13.0:
-                    continue
-                if lbbox.y0 > h * 0.915:
-                    continue
-                if PAGE_NUM_REGEX.match(line_text) and (lbbox.y0 > h * 0.85 or lbbox.y1 < h * 0.12):
+                band = "top" if lbbox.y1 < h * .12 else ("bottom" if lbbox.y0 > h * .88 else "")
+                if (band, " ".join(line_text.split())) in exclusions:
                     continue
 
             font_sizes.append(max_sz)
@@ -1179,14 +1243,7 @@ def extract_structured_text_from_page(page: fitz.Page, pno: int, trim_hf: bool =
             curr_para_text = txt
             curr_para_bbox = fitz.Rect(lb)
         else:
-            # Join CJK without space, ASCII words with space
-            if curr_para_text[-1].isascii() and curr_para_text[-1].isalnum() and txt[0].isascii() and txt[0].isalnum():
-                if curr_para_text.endswith("-"):
-                    curr_para_text = curr_para_text[:-1] + txt
-                else:
-                    curr_para_text += " " + txt
-            else:
-                curr_para_text += txt
+            curr_para_text = _join_wrapped_text(curr_para_text, txt)
             if curr_para_bbox:
                 curr_para_bbox |= lb
 
@@ -1414,7 +1471,8 @@ def generate_cover_pil_image(
     tmp_doc = fitz.open()
     eff_opts = ProcessOptions(**{**options.__dict__})
     if eff_opts.cover_mode == "none":
-        eff_opts.cover_mode = "smart_card"
+        tmp_doc.close()
+        raise ValueError("当前设置为不生成封面。")
     _insert_cover_page_to_doc(src_doc, input_pdf_path, tmp_doc, eff_opts)
     page = tmp_doc[0]
     scale_x = KPW6_PX_W / KPW6_PT_W
@@ -1433,10 +1491,10 @@ def build_kpw6_epub(
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
 ) -> Dict[str, Any]:
     """
-    Universal KPW6 EPUB 3 Builder with Official Amazon Send-to-Kindle Cover Support:
-    - Always embeds a 1264x1680 cover image (OEBPS/images/cover.jpg) with both EPUB 3
+    Universal KPW6 EPUB 3 Builder with optional cover metadata:
+    - When enabled, embeds a 1264x1680 cover image (OEBPS/images/cover.jpg) with EPUB 3
       (properties="cover-image") and EPUB 2 (<meta name="cover" content="cover-image"/>)
-      declarations so KPW6 Library Bookshelf AND Lockscreen ("显示正在阅读的书籍封面") 100% display the cover!
+      declarations for compatible readers. cover_mode="none" omits the cover.
     - For 'pure_text' mode: builds reflowable text chapters with native font scaling & dictionary lookup.
     - For 'academic_2col', 'tech_book', 'scanned_book', 'comic_manga' modes: packages our KPW6
       1264x1680 reformatted screens into a zero-margin full-screen EPUB with full TOC navigation
@@ -1451,12 +1509,14 @@ def build_kpw6_epub(
     limit_pages = len(target_pages)
 
     book_title, book_author = extract_book_meta(src_doc, input_pdf_path, options)
-    if progress_cb:
+    has_cover = options.cover_mode != "none"
+    if progress_cb and has_cover:
         progress_cb(0, max(1, limit_pages), "正在生成 1264×1680 KPW6 精装封面...")
-    cover_pil = generate_cover_pil_image(src_doc, input_pdf_path, options)
-    cover_buf = io.BytesIO()
-    cover_pil.save(cover_buf, format="JPEG", quality=90, optimize=True)
-    cover_bytes = cover_buf.getvalue()
+    if has_cover:
+        cover_pil = generate_cover_pil_image(src_doc, input_pdf_path, options)
+        cover_buf = io.BytesIO()
+        cover_pil.save(cover_buf, format="JPEG", quality=90, optimize=True)
+        cover_bytes = cover_buf.getvalue()
 
     book_uuid = str(uuid.uuid4())
 
@@ -1508,17 +1568,20 @@ div.screen-box img {
         '<item id="style" href="style.css" media-type="text/css"/>',
         '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
         '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
-        '<item id="cover-image" href="images/cover.jpg" media-type="image/jpeg" properties="cover-image"/>',
-        '<item id="cover-page" href="cover.xhtml" media-type="application/xhtml+xml"/>',
     ]
-    spine_items = ['<itemref idref="cover-page" linear="yes"/>']
-    nav_lis = ['      <li><a href="cover.xhtml">📖 书籍封面</a></li>']
+    if has_cover:
+        manifest_items.extend([
+            '<item id="cover-image" href="images/cover.jpg" media-type="image/jpeg" properties="cover-image"/>',
+            '<item id="cover-page" href="cover.xhtml" media-type="application/xhtml+xml"/>',
+        ])
+    spine_items = ['<itemref idref="cover-page" linear="yes"/>'] if has_cover else []
+    nav_lis = ['      <li><a href="cover.xhtml">📖 书籍封面</a></li>'] if has_cover else []
     ncx_navpoints = [
         """    <navPoint id="navPoint-0" playOrder="1">
       <navLabel><text>📖 书籍封面</text></navLabel>
       <content src="cover.xhtml"/>
     </navPoint>"""
-    ]
+    ] if has_cover else []
 
     chapters_count = 0
     paragraphs_count = 0
@@ -1541,7 +1604,8 @@ div.screen-box img {
 
         # 3. OEBPS/style.css + Cover image & Cover XHTML
         zf.writestr("OEBPS/style.css", css_content)
-        zf.writestr("OEBPS/images/cover.jpg", cover_bytes)
+        if has_cover:
+            zf.writestr("OEBPS/images/cover.jpg", cover_bytes)
 
         safe_book_title = html.escape(book_title)
         safe_book_author = html.escape(book_author)
@@ -1559,7 +1623,8 @@ div.screen-box img {
   </div>
 </body>
 </html>"""
-        zf.writestr("OEBPS/cover.xhtml", cover_xhtml)
+        if has_cover:
+            zf.writestr("OEBPS/cover.xhtml", cover_xhtml)
 
         use_reflow = (options.mode == "pure_text") if force_reflow is None else force_reflow
         if use_reflow:
@@ -1589,10 +1654,7 @@ div.screen-box img {
                     prev_t = all_items[-1].text
                     if prev_t and prev_t[-1] not in TERMINAL_PUNCT:
                         nxt_t = page_items[0].text
-                        if prev_t[-1].isascii() and nxt_t[0].isascii():
-                            all_items[-1].text = prev_t + " " + nxt_t
-                        else:
-                            all_items[-1].text = prev_t + nxt_t
+                        all_items[-1].text = _join_wrapped_text(prev_t, nxt_t)
                         page_items = page_items[1:]
                 all_items.extend(page_items)
 
@@ -1646,7 +1708,7 @@ div.screen-box img {
                 spine_items.append(f'<itemref idref="{cid}"/>')
                 nav_lis.append(f'      <li><a href="{fname}">{safe_title}</a></li>')
                 ncx_navpoints.append(
-                    f"""    <navPoint id="navPoint-{idx}" playOrder="{idx + 1}">
+                    f"""    <navPoint id="navPoint-{idx}" playOrder="{idx + int(has_cover)}">
       <navLabel><text>{safe_title}</text></navLabel>
       <content src="{fname}"/>
     </navPoint>"""
@@ -1733,7 +1795,7 @@ div.screen-box img {
                 href = f"screen_{target_scr:04d}.xhtml"
                 nav_lis.append(f'      <li><a href="{href}">{safe_t}</a></li>')
                 ncx_navpoints.append(
-                    f"""    <navPoint id="navPoint-{idx}" playOrder="{idx + 1}">
+                    f"""    <navPoint id="navPoint-{idx}" playOrder="{idx + int(has_cover)}">
       <navLabel><text>{safe_t}</text></navLabel>
       <content src="{href}"/>
     </navPoint>"""
@@ -1770,6 +1832,9 @@ div.screen-box img {
         zf.writestr("OEBPS/toc.ncx", ncx_xml)
 
         # 6. OEBPS/content.opf (Includes both EPUB 2 <meta name="cover"> and EPUB 3 properties="cover-image" + <guide>)
+        modified = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cover_meta = '<meta name="cover" content="cover-image"/>' if has_cover else ''
+        cover_guide = '<guide><reference type="cover" title="书籍封面" href="cover.xhtml"/></guide>' if has_cover else ''
         opf_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="3.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
@@ -1777,7 +1842,8 @@ div.screen-box img {
     <dc:title>{safe_book_title}</dc:title>
     <dc:language>zh-CN</dc:language>
     <dc:creator>{safe_book_author}</dc:creator>
-    <meta name="cover" content="cover-image"/>
+    <meta property="dcterms:modified">{modified}</meta>
+    {cover_meta}
   </metadata>
   <manifest>
 {chr(10).join("    " + m for m in manifest_items)}
@@ -1785,9 +1851,7 @@ div.screen-box img {
   <spine toc="ncx">
 {chr(10).join("    " + s for s in spine_items)}
   </spine>
-  <guide>
-    <reference type="cover" title="书籍封面" href="cover.xhtml"/>
-  </guide>
+  {cover_guide}
 </package>"""
         zf.writestr("OEBPS/content.opf", opf_xml)
 
@@ -1822,16 +1886,19 @@ def build_kpw6_cbz(
     limit_pages = len(target_pages)
     book_title, book_author = extract_book_meta(src_doc, input_pdf_path, options)
 
-    cover_pil = generate_cover_pil_image(src_doc, input_pdf_path, options)
-    cover_buf = io.BytesIO()
-    cover_pil.save(cover_buf, format="JPEG", quality=92, optimize=True)
+    has_cover = options.cover_mode != "none"
+    if has_cover:
+        cover_pil = generate_cover_pil_image(src_doc, input_pdf_path, options)
+        cover_buf = io.BytesIO()
+        cover_pil.save(cover_buf, format="JPEG", quality=92, optimize=True)
 
     scale_x = KPW6_PX_W / KPW6_PT_W
     scale_y = KPW6_PX_H / KPW6_PT_H
     screen_idx = 0
 
     with zipfile.ZipFile(output_cbz_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("0000_cover.jpg", cover_buf.getvalue(), compress_type=zipfile.ZIP_STORED)
+        if has_cover:
+            zf.writestr("0000_cover.jpg", cover_buf.getvalue(), compress_type=zipfile.ZIP_STORED)
 
         for step_i, pno in enumerate(target_pages, start=1):
             if progress_cb:
@@ -1853,7 +1920,7 @@ def build_kpw6_cbz(
 <ComicInfo xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <Title>{html.escape(book_title)}</Title>
   <Writer>{html.escape(book_author)}</Writer>
-  <PageCount>{screen_idx + 1}</PageCount>
+  <PageCount>{screen_idx + int(has_cover)}</PageCount>
   <Manga>{"YesAndRightToLeft" if (options.mode == "comic_manga" and options.manga_rtl) else "No"}</Manga>
 </ComicInfo>"""
         zf.writestr("ComicInfo.xml", comic_info)
@@ -1899,7 +1966,8 @@ def convert_epub_via_calibre(
     if book_author:
         cmd.extend(["--authors", book_author])
 
-    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    from conversion_runner import run_conversion
+    run_conversion(cmd)
     return {
         "output_path": output_target_path,
         "output_size_mb": round(os.path.getsize(output_target_path) / (1024 * 1024), 2),
@@ -2484,7 +2552,7 @@ def build_kpw6_pdf(
                 prev_t = all_items[-1].text
                 if prev_t and prev_t[-1] not in TERMINAL_PUNCT:
                     nxt_t = p_items[0].text
-                    all_items[-1].text = (prev_t + " " + nxt_t) if (prev_t[-1].isascii() and nxt_t[0].isascii()) else (prev_t + nxt_t)
+                    all_items[-1].text = _join_wrapped_text(prev_t, nxt_t)
                     p_items = p_items[1:]
             all_items.extend(p_items)
         if all_items:
@@ -2502,10 +2570,14 @@ def build_kpw6_pdf(
             new_toc = [[1, "📖 书籍封面", 1]] if has_cover else []
             toc = src_doc.get_toc()
             if toc and page_map:
+                surviving_levels = []
                 for lvl, title, src_p1 in toc:
                     src_p0 = max(0, src_p1 - 1)
                     if src_p0 in page_map:
-                        new_toc.append([lvl, title, page_map[src_p0] + 1])
+                        while surviving_levels and surviving_levels[-1] >= lvl:
+                            surviving_levels.pop()
+                        surviving_levels.append(lvl)
+                        new_toc.append([len(surviving_levels), title, page_map[src_p0] + 1])
             if new_toc:
                 out_doc.set_toc(new_toc)
         except Exception:
@@ -2517,7 +2589,8 @@ def build_kpw6_pdf(
             "author": book_author,
             "subject": "Kindle Paperwhite Signature Edition (KPW6) 300 PPI Optimized Document",
             "creator": "KPW6 PDF Studio",
-            "producer": "KPW6 PDF Studio",
+            "producer": (f"KPW6 PDF Studio / PyMuPDF {fitz.VersionBind} / MuPDF {fitz.VersionFitz} "
+                         "(AGPL-3.0; Copyright Artifex Software, Inc.)"),
         })
     except Exception:
         pass
@@ -2622,7 +2695,7 @@ def scan_document_highlights(input_pdf_path: str) -> List[Dict[str, Any]]:
     try:
         doc = _open_source_pdf(input_pdf_path)
         total = len(doc)
-        scan_limit = min(total, 400)
+        scan_limit = total
         table_cap_re = re.compile(
             r"(?:^|\n)\s*(?:Table\s+(\d+[A-Za-z]?|[IVXLCDM]+)(?:\s*[.\-—:：]|\s*\n|\s*$)|TABLE\s+(\d+[A-Za-z]?|[IVXLCDM]+)(?:\s*[.\-—:：]|\s*\n|\s*$))",
             re.MULTILINE,
@@ -2665,7 +2738,7 @@ def scan_document_highlights(input_pdf_path: str) -> List[Dict[str, Any]]:
         doc.close()
     except Exception:
         pass
-    return highlights[:45]
+    return highlights
 
 
 def render_preview_comparison(
