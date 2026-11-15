@@ -11,8 +11,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
+import urllib.request
 import zipfile
 
 
@@ -134,7 +136,7 @@ class PackagingRegressions(unittest.TestCase):
             self.assertTrue(any(name.endswith("/app.py") for name in names))
             self.assertTrue(any(name.endswith("/LICENSE") for name in names))
             self.assertFalse(any("private.pdf" in name or "key.pem" in name or "/.git/" in name or "evidence.json" in name or name.endswith("/.env") or name.endswith("/id_rsa") for name in names), names)
-        source_info = (release / "SOURCE_CODE.md").read_text()
+        source_info = (release / "SOURCE_CODE.md").read_text(encoding="utf-8")
         self.assertIn("SOURCE.zip", source_info)
         self.assertIn("AGPL", source_info)
         self.assertTrue((release / "RELEASE_MANIFEST.json").is_file())
@@ -167,6 +169,26 @@ class PackagingRegressions(unittest.TestCase):
         with patch.object(support.metadata, 'distribution', side_effect=lambda name: dists[name]):
             included = support.runtime_distributions(source)
         self.assertEqual(included, [dists['pillow'], dists['pymupdf']])
+
+    def test_frozen_smoke_contacts_loopback_without_environment_proxy(self):
+        from local_server import LoopbackWSGIServer
+        smoke = self.load_script('smoke_frozen.py')
+        def respond(environ, start_response):
+            start_response('200 OK', [('Content-Type', 'text/plain')])
+            return [b'local health response']
+        server = LoopbackWSGIServer('127.0.0.1', 0, respond)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            environment = {'http_proxy': 'http://127.0.0.1:1', 'HTTP_PROXY': 'http://127.0.0.1:1',
+                           'no_proxy': '', 'NO_PROXY': ''}
+            with patch.dict(os.environ, environment), patch.object(urllib.request, '_opener', None):
+                result = smoke.request(f'http://127.0.0.1:{server.server_port}', '/api/health')
+            self.assertEqual(result, b'local health response')
+        finally:
+            server.shutdown()
+            thread.join(timeout=3)
+            server.server_close()
 
     def test_no_system_cjk_font_keeps_requested_size_and_safe_ascii_labels(self):
         icons = self.load_script("make_icon.py")

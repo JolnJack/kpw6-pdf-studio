@@ -12,7 +12,8 @@ import urllib.request
 def request(base, path, payload=None):
     data = json.dumps(payload).encode() if payload is not None else None
     headers = {'Content-Type': 'application/json'} if data is not None else {}
-    with urllib.request.urlopen(urllib.request.Request(base + path, data=data, headers=headers), timeout=90) as response:
+    direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with direct.open(urllib.request.Request(base + path, data=data, headers=headers), timeout=90) as response:
         return response.read()
 
 
