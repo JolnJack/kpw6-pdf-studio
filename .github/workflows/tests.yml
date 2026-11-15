@@ -26,5 +26,6 @@ jobs:
         with:
           node-version: "22"
       - run: python -m pip install -r requirements-dev.txt
+      - run: python -u tests/worker_protocol_probe.py
       - run: python -u -c "import faulthandler, runpy; faulthandler.dump_traceback_later(30, repeat=True); runpy.run_module('unittest', run_name='__main__')" discover -s tests -v
       - run: node --test tests/preview_race.test.cjs tests/frontend_release.test.cjs

@@ -33,6 +33,7 @@ from pdf_engine import (
 )
 from pdf_service import PDF_SERVICE, worker_function
 from conversion_runner import cancel_all_conversions
+from local_server import LoopbackWSGIServer
 
 # The HTTP process only handles options, files and progress. Native document
 # objects never cross threads or process boundaries.
@@ -2820,6 +2821,8 @@ if __name__ == "__main__":
     args, _ = parser.parse_known_args()
 
     bound_port = _find_available_port(args.port)
+    server = LoopbackWSGIServer("127.0.0.1", bound_port, app)
+    bound_port = server.server_port
     url = f"http://127.0.0.1:{bound_port}"
     if args.port_file:
         try:
@@ -2833,4 +2836,5 @@ if __name__ == "__main__":
         threading.Thread(target=_open_browser_when_ready, args=(url, bound_port), daemon=True).start()
 
     print(f"🚀 KPW6 PDF Studio (五合一全能版) 已启动: {url} (导出目录: {OUTPUT_DIR})", flush=True)
-    app.run(host="127.0.0.1", port=bound_port, debug=False, threaded=True)
+    with server:
+        server.serve_forever()

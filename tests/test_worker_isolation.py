@@ -77,6 +77,21 @@ class RequestIsolationTests(unittest.TestCase):
     def test_zero_port_selects_an_actual_listening_port(self):
         self.assertGreater(self.app._find_available_port(0), 0)
 
+    def test_loopback_server_starts_and_serves_without_reverse_dns(self):
+        from local_server import LoopbackWSGIServer
+        with patch.object(socket, 'getfqdn', side_effect=AssertionError('reverse DNS must not delay local startup')):
+            server = LoopbackWSGIServer('127.0.0.1', 0, self.app.app)
+        self.addCleanup(server.server_close)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with direct.open(f'http://127.0.0.1:{server.server_port}/api/health', timeout=3) as response:
+                self.assertTrue(json.load(response)['ok'])
+        finally:
+            server.shutdown()
+            thread.join(timeout=3)
+
     def test_worker_restarts_after_process_failure(self):
         from pdf_service import PdfService
         service = PdfService()
