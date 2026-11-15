@@ -117,7 +117,10 @@ class ProcessShutdownTests(unittest.TestCase):
             with socket.socket() as probe:
                 probe.bind(('127.0.0.1', 0))
                 preferred_port = probe.getsockname()[1]
-            server = subprocess.Popen([sys.executable, str(REPO / 'app.py'), '--no-browser', '--port', str(preferred_port), '--port-file', str(port_file)],
+            launcher = ('import faulthandler,runpy,sys; '
+                        'faulthandler.dump_traceback_later(15, repeat=True); '
+                        'runpy.run_path(sys.argv.pop(1), run_name="__main__")')
+            server = subprocess.Popen([sys.executable, '-u', '-c', launcher, str(REPO / 'app.py'), '--no-browser', '--port', str(preferred_port), '--port-file', str(port_file)],
                                       env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             converter_pid = None
             request_thread = None
@@ -125,6 +128,7 @@ class ProcessShutdownTests(unittest.TestCase):
             try:
                 deadline = time.monotonic() + 20
                 port = None
+                connection_error = None
                 while time.monotonic() < deadline:
                     if server.poll() is not None:
                         self.fail('server exited during startup: ' + (root / 'server.log').read_text())
@@ -135,11 +139,11 @@ class ProcessShutdownTests(unittest.TestCase):
                             try:
                                 with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health', timeout=0.5):
                                     break
-                            except OSError:
-                                pass
+                            except OSError as exc:
+                                connection_error = repr(exc)
                     time.sleep(0.05)
                 else:
-                    self.fail('server health timeout: ' + (root / 'server.log').read_text())
+                    self.fail(f'server health timeout ({connection_error}): ' + (root / 'server.log').read_text())
                 def export():
                     payload = json.dumps({'file_id': 'demo_tech_book', 'mode': 'tech_book', 'export_format': 'azw3', 'cover_mode': 'none'}).encode()
                     request = urllib.request.Request(f'http://127.0.0.1:{port}/api/export_unified', data=payload, headers={'Content-Type': 'application/json'})
