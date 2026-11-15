@@ -175,6 +175,20 @@ test('the current preview error clears stale images and gives an explicit messag
   assert.notEqual(h.elements.get('previewErrorNotice').style.display, 'none');
 });
 
+test('a rejected PDF upload preserves an in-flight preview for the current valid document', async () => {
+  const h = harness();
+  h.run('currentFileId = "valid-book"; document.getElementById("sourcePreviewImg").src = "older-image"');
+  const preview = h.run('refreshPreview()');
+  const upload = h.run('handleFileUpload({name: "corrupt.pdf"})');
+  h.reply(1, {error: 'PDF损坏'}, 400);
+  await upload;
+  h.reply(0, h.preview(0, 'valid-book-image'));
+  await preview;
+  assert.equal(h.run('currentFileId'), 'valid-book');
+  assert.equal(h.elements.get('sourcePreviewImg').src, 'valid-book-image');
+  assert.match(h.alerts.at(-1), /PDF损坏/);
+});
+
 test('a stale preview error cannot clear a newer successful preview', async () => {
   const h = harness();
   const first = h.run('refreshPreview()');

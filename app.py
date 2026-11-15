@@ -1469,7 +1469,8 @@ async function loadDemo(fileId, mode) {
 async function handleFileUpload(file) {
   if (!file) return;
   const selectionId = ++fileSelectionSerial;
-  ++previewRequestSerial;
+  // Keep the current document's pending preview valid until a new PDF is
+  // accepted. Successful uploads change file_id, which rejects older images.
   const previousName = document.getElementById("currentFileName").innerText;
   document.getElementById("currentFileName").innerText = "⏳ 正在上传并建立图表索引：" + file.name + " ...";
   const form = new FormData();
