@@ -80,6 +80,13 @@ def _operation(name, args, kwargs):
 
 
 def run_worker():
+    # NumPy's Windows native import can deadlock while another thread blocks
+    # reading piped stdin (numpy/numpy#24290). Load our native runtime on this
+    # main thread before the owner-pipe reader starts. Later RPC imports are
+    # cached; diagnostics still stay outside the JSON result stream.
+    with contextlib.redirect_stdout(sys.stderr):
+        import pdf_engine
+
     requests = queue.Queue()
     stop_requested = threading.Event()
     output = sys.stdout
