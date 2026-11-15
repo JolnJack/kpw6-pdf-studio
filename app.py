@@ -10,7 +10,7 @@ import urllib.parse
 import uuid
 import webbrowser
 from dataclasses import replace
-import fitz
+import pymupdf as fitz
 from flask import Flask, request, jsonify, send_file, render_template_string
 
 from pdf_engine import (
@@ -71,6 +71,12 @@ for key, path in DEMO_PATHS.items():
     }
 
 
+def _validate_pdf(pdf_path: str):
+    with fitz.open(pdf_path) as doc:
+        if not doc.is_pdf or doc.needs_pass or doc.page_count == 0:
+            raise ValueError("请选择有效、未加密且至少包含一页的 PDF。")
+
+
 def _scan_uploads_dir():
     """Register any PDFs in UPLOAD_DIR so server restarts or page refreshes keep user files accessible."""
     for fname in sorted(os.listdir(UPLOAD_DIR)):
@@ -78,6 +84,12 @@ def _scan_uploads_dir():
             fid, orig_name = fname.split("_", 1)
             full_p = os.path.join(UPLOAD_DIR, fname)
             if os.path.isfile(full_p):
+                if fid not in FILES:
+                    try:
+                        _validate_pdf(full_p)
+                    except Exception:
+                        # Ignore damaged files left by older versions without deleting them.
+                        continue
                 FILES[fid] = {
                     "path": full_p,
                     "name": orig_name,
@@ -1188,6 +1200,8 @@ let currentExportFormat = "epub_layout";
 let userManuallyChoseFormat = false;
 let currentSplitVolumesEvery = 0;
 let pageOverridesByFile = {};
+let previewRequestSerial = 0;
+let fileSelectionSerial = 0;
 
 const ALL_MODES = ["academic_2col", "tech_book", "scanned_book", "comic_manga", "pure_text"];
 
@@ -1381,6 +1395,8 @@ function highlightActiveFilePill() {
 }
 
 async function switchToUploadedFile(fileId, fileName) {
+  const selectionId = ++fileSelectionSerial;
+  ++previewRequestSerial;
   currentFileId = fileId;
   currentPage = 0;
   currentScreenIdx = 0;
@@ -1391,6 +1407,7 @@ async function switchToUploadedFile(fileId, fileName) {
 
   const res = await fetch("/api/doc_info?file_id=" + encodeURIComponent(fileId));
   const info = await res.json();
+  if (selectionId !== fileSelectionSerial || fileId !== currentFileId) return;
   if (info.detected) {
     const banner = document.getElementById("detectBanner");
     banner.style.display = "block";
@@ -1402,6 +1419,8 @@ async function switchToUploadedFile(fileId, fileName) {
 }
 
 async function loadDemo(fileId, mode) {
+  const selectionId = ++fileSelectionSerial;
+  ++previewRequestSerial;
   currentFileId = fileId;
   currentPage = 0;
   currentScreenIdx = 0;
@@ -1419,17 +1438,32 @@ async function loadDemo(fileId, mode) {
   highlightActiveFilePill();
   const res = await fetch("/api/doc_info?file_id=" + encodeURIComponent(fileId));
   const info = await res.json();
+  if (selectionId !== fileSelectionSerial || fileId !== currentFileId) return;
   renderHighlightsBar(info.highlights || []);
   selectMode(mode);
 }
 
 async function handleFileUpload(file) {
   if (!file) return;
+  const selectionId = ++fileSelectionSerial;
+  ++previewRequestSerial;
+  const previousName = document.getElementById("currentFileName").innerText;
   document.getElementById("currentFileName").innerText = "⏳ 正在上传并建立图表索引：" + file.name + " ...";
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch("/api/upload", { method: "POST", body: form });
-  const data = await res.json();
+  let data;
+  try {
+    const res = await fetch("/api/upload", { method: "POST", body: form });
+    data = await res.json();
+    if (selectionId !== fileSelectionSerial) return;
+    if (!res.ok || data.error) throw new Error(data.error || "无法上传 PDF");
+  } catch (err) {
+    if (selectionId !== fileSelectionSerial) return;
+    document.getElementById("currentFileName").innerText = previousName;
+    document.getElementById("loadingBadge").style.display = "none";
+    alert("上传失败：" + (err.message || err));
+    return;
+  }
   if (data.file_id) {
     currentFileId = data.file_id;
     currentPage = 0;
@@ -1608,6 +1642,7 @@ function getOptionsPayload() {
 }
 
 async function refreshPreview(targetScreenIdx = 0) {
+  const requestId = ++previewRequestSerial;
   const badge = document.getElementById("loadingBadge");
   badge.style.display = "block";
   badge.innerText = `⏳ 正在渲染第 ${currentPage + 1} 页预览...`;
@@ -1620,6 +1655,7 @@ async function refreshPreview(targetScreenIdx = 0) {
       body: JSON.stringify(payload)
     });
     const data = await res.json();
+    if (requestId !== previewRequestSerial || payload.file_id !== currentFileId) return;
     if (data.error) return;
 
     currentPage = data.page_num;
@@ -1692,7 +1728,7 @@ async function refreshPreview(targetScreenIdx = 0) {
       selectKpw6Screen(safeIdx, false);
     }
   } finally {
-    badge.style.display = "none";
+    if (requestId === previewRequestSerial) badge.style.display = "none";
   }
 }
 
@@ -2149,16 +2185,29 @@ def api_upload():
         return jsonify({"error": "No file"}), 400
     fid = str(uuid.uuid4())[:8]
     safe_name = _clean_upload_filename(f.filename, "document.pdf")
+    if not safe_name.lower().endswith(".pdf"):
+        safe_name += ".pdf"
     save_path = os.path.join(UPLOAD_DIR, f"{fid}_{safe_name}")
-    f.save(save_path)
+    temp_path = os.path.join(UPLOAD_DIR, f".upload_{uuid.uuid4().hex}.part")
+    try:
+        f.save(temp_path)
+        _validate_pdf(temp_path)
+        detected = detect_pdf_category(temp_path)
+        highlights = scan_document_highlights(temp_path)
+        # Publish only a successfully validated file; directory scans ignore .part files.
+        os.replace(temp_path, save_path)
+    except Exception:
+        return jsonify({"error": "无法读取 PDF，请确认文件完整、未加密且至少包含一页。"}), 400
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
     FILES[fid] = {
         "path": save_path,
         "name": safe_name,
         "is_demo": False,
         "mtime": os.path.getmtime(save_path),
     }
-    detected = detect_pdf_category(save_path)
-    highlights = _get_highlights(fid, save_path)
+    HIGHLIGHTS_CACHE[fid] = highlights
     return jsonify({
         "file_id": fid,
         "filename": safe_name,
@@ -2214,14 +2263,18 @@ def api_export():
         "pure_text": "纯文字大字重排",
     }.get(opts.mode, "KPW6")
     out_filename = f"{base_name}_KPW6_{mode_tag}.pdf"
-    out_path = os.path.join(OUTPUT_DIR, out_filename)
+    export_id, export_dir = _new_export_directory()
+    out_path = os.path.join(export_dir, out_filename)
 
-    stats = build_kpw6_pdf(src_info["path"], out_path, opts)
+    try:
+        stats = build_kpw6_pdf(src_info["path"], out_path, opts)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     return jsonify({
         **stats,
         "output_filename": out_filename,
-        "download_url": _dl_url(out_filename),
-        "view_url": _view_url(out_filename),
+        "download_url": _dl_url(f"{export_id}/{out_filename}"),
+        "view_url": _view_url(f"{export_id}/{out_filename}"),
     })
 
 
@@ -2260,6 +2313,13 @@ def _scaled_progress_cb(progress_cb, lo: int, hi: int):
     return _sub
 
 
+def _new_export_directory() -> tuple[str, str]:
+    export_id = uuid.uuid4().hex
+    export_dir = os.path.join(OUTPUT_DIR, export_id)
+    os.makedirs(export_dir, exist_ok=False)
+    return export_id, export_dir
+
+
 def _export_single_volume(
     pdf_path: str,
     base_name: str,
@@ -2270,16 +2330,17 @@ def _export_single_volume(
     progress_cb,
 ) -> dict:
     """Build one volume (or the whole book) in the requested format and return download metadata."""
+    export_id, export_dir = _new_export_directory()
     if export_fmt == "pdf":
         out_filename = f"{base_name}_KPW6_{mode_tag}{vol_suffix}.pdf"
-        out_path = os.path.join(OUTPUT_DIR, out_filename)
+        out_path = os.path.join(export_dir, out_filename)
         stats = build_kpw6_pdf(pdf_path, out_path, vol_opts, progress_cb=progress_cb)
         return {
             **stats,
             "output_filename": out_filename,
-            "download_url": _dl_url(out_filename),
+            "download_url": _dl_url(f"{export_id}/{out_filename}"),
             "download_label": f"💾 下载{vol_suffix or ''} .PDF ({stats['output_size_mb']} MB)",
-            "view_url": _view_url(out_filename),
+            "view_url": _view_url(f"{export_id}/{out_filename}"),
             "message": f"✅ 已生成 PDF：{out_filename} （选中 {stats['input_pages']} 页 ➔ KPW6 精排 {stats['output_pages']} 屏，体积 {stats['output_size_mb']} MB）",
         }
 
@@ -2287,7 +2348,7 @@ def _export_single_volume(
         is_reflow = (export_fmt == "epub_reflow")
         sub_tag = "流式可调字号带封面" if is_reflow else f"{mode_tag}带封面"
         out_filename = f"{base_name}_KPW6_{sub_tag}{vol_suffix}.epub"
-        out_path = os.path.join(OUTPUT_DIR, out_filename)
+        out_path = os.path.join(export_dir, out_filename)
         stats = build_kpw6_epub(pdf_path, out_path, vol_opts, force_reflow=is_reflow, progress_cb=progress_cb)
         detail = (
             f"识别 {stats['chapters_count']} 章 / {stats['paragraphs_count']} 段"
@@ -2297,14 +2358,14 @@ def _export_single_volume(
         return {
             **stats,
             "output_filename": out_filename,
-            "download_url": _dl_url(out_filename),
+            "download_url": _dl_url(f"{export_id}/{out_filename}"),
             "download_label": f"💾 下载{vol_suffix or '带封面'} .EPUB ({stats['output_size_mb']} MB)",
             "message": f"✅ 已生成带封面 EPUB：{out_filename} （{detail}，体积 {stats['output_size_mb']} MB · 传 Send to Kindle 即可显示封面）",
         }
 
     if export_fmt in ("azw3", "mobi"):
         ext = export_fmt
-        temp_epub = os.path.join(OUTPUT_DIR, f"_tmp_{base_name}{vol_suffix}_KPW6.epub")
+        temp_epub = os.path.join(export_dir, f"_tmp_{base_name}{vol_suffix}_KPW6.epub")
         is_reflow = (vol_opts.mode == "pure_text")
         try:
             epub_stats = build_kpw6_epub(
@@ -2317,7 +2378,7 @@ def _export_single_volume(
             if progress_cb:
                 progress_cb(86, 100, f"正在调用 Calibre 引擎编译 .{ext.upper()} (含封面与目录)...")
             out_filename = f"{base_name}_KPW6_{mode_tag}带封面{vol_suffix}.{ext}"
-            out_path = os.path.join(OUTPUT_DIR, out_filename)
+            out_path = os.path.join(export_dir, out_filename)
             conv_stats = convert_epub_via_calibre(
                 temp_epub,
                 out_path,
@@ -2334,26 +2395,26 @@ def _export_single_volume(
             **epub_stats,
             **conv_stats,
             "output_filename": out_filename,
-            "download_url": _dl_url(out_filename),
+            "download_url": _dl_url(f"{export_id}/{out_filename}"),
             "download_label": f"💾 下载{vol_suffix or ''} .{ext.upper()} ({conv_stats['output_size_mb']} MB)",
             "message": f"✅ 已生成 Kindle 原生 .{ext.upper()}：{out_filename} （含内置封面与目录，体积 {conv_stats['output_size_mb']} MB）",
         }
 
     if export_fmt == "cbz":
         out_filename = f"{base_name}_KPW6_{mode_tag}高清图集{vol_suffix}.cbz"
-        out_path = os.path.join(OUTPUT_DIR, out_filename)
+        out_path = os.path.join(export_dir, out_filename)
         stats = build_kpw6_cbz(pdf_path, out_path, vol_opts, progress_cb=progress_cb)
         return {
             **stats,
             "output_filename": out_filename,
-            "download_url": _dl_url(out_filename),
+            "download_url": _dl_url(f"{export_id}/{out_filename}"),
             "download_label": f"💾 下载{vol_suffix or ''} .CBZ ({stats['output_size_mb']} MB)",
             "message": f"✅ 已生成 1264×1680 无损图集包：{out_filename} （含封面 + {stats['screens_count']} 屏，体积 {stats['output_size_mb']} MB）",
         }
 
     if export_fmt == "bundle_both":
         pdf_filename = f"{base_name}_KPW6_{mode_tag}{vol_suffix}.pdf"
-        pdf_path_out = os.path.join(OUTPUT_DIR, pdf_filename)
+        pdf_path_out = os.path.join(export_dir, pdf_filename)
         pdf_stats = build_kpw6_pdf(
             pdf_path,
             pdf_path_out,
@@ -2362,7 +2423,7 @@ def _export_single_volume(
         )
 
         epub_filename = f"{base_name}_KPW6_{mode_tag}带封面{vol_suffix}.epub"
-        epub_path_out = os.path.join(OUTPUT_DIR, epub_filename)
+        epub_path_out = os.path.join(export_dir, epub_filename)
         epub_stats = build_kpw6_epub(
             pdf_path,
             epub_path_out,
@@ -2372,11 +2433,11 @@ def _export_single_volume(
         )
         return {
             "output_filename": f"{pdf_filename} & {epub_filename}",
-            "download_url": _dl_url(epub_filename),
+            "download_url": _dl_url(f"{export_id}/{epub_filename}"),
             "download_label": f"💾 下载{vol_suffix or '带封面'} .EPUB ({epub_stats['output_size_mb']} MB)",
-            "second_download_url": _dl_url(pdf_filename),
+            "second_download_url": _dl_url(f"{export_id}/{pdf_filename}"),
             "second_download_label": f"💾 下载{vol_suffix or '矢量'} .PDF ({pdf_stats['output_size_mb']} MB)",
-            "view_url": _view_url(pdf_filename),
+            "view_url": _view_url(f"{export_id}/{pdf_filename}"),
             "output_size_mb": round(epub_stats["output_size_mb"] + pdf_stats["output_size_mb"], 2),
             "message": f"✅ 双格式同时生成完毕！EPUB ({epub_stats['output_size_mb']} MB，带书架封面) + PDF ({pdf_stats['output_size_mb']} MB，矢量无损)",
         }

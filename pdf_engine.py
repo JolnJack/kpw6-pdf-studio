@@ -82,18 +82,52 @@ def get_target_page_list(total_pages: int, options: ProcessOptions) -> List[int]
     Compute the exact ordered list of 0-based source page indices to export,
     respecting start_page, end_page, max_pages, explicit_pages, and per-page 'skip' overrides.
     """
+    if total_pages <= 0:
+        return []
     if options.explicit_pages is not None:
         base_pages = [p for p in options.explicit_pages if 0 <= p < total_pages]
     else:
         limit = min(total_pages, options.max_pages) if options.max_pages else total_pages
+        if limit <= 0:
+            return []
         s0 = max(0, (options.start_page or 1) - 1)
         e0 = min(limit - 1, (options.end_page - 1) if (options.end_page and options.end_page > 0) else (limit - 1))
+        if s0 >= limit:
+            raise ValueError(f"起始页 {s0 + 1} 超出文档页数（共 {limit} 页）。")
         if e0 < s0:
-            s0, e0 = e0, s0
+            raise ValueError("结束页不能早于起始页，请检查导出页码范围。")
         base_pages = list(range(s0, e0 + 1))
 
     overrides = options.page_overrides or {}
     return [p for p in base_pages if overrides.get(str(p)) != "skip"]
+
+
+def _open_source_pdf(pdf_path: str) -> fitz.Document:
+    """Normalize rotation in memory so rendering, text and vector clips share coordinates.
+
+    The source file is never saved or modified. Keep the visual rotation in the
+    content stream instead of /Rotate, as required for clipped show_pdf_page().
+    """
+    doc = fitz.open(pdf_path)
+    try:
+        for page in doc:
+            if page.rotation:
+                # remove_rotation() works on MediaBox coordinates. Temporarily
+                # expose that full box, then restore the transformed visible crop.
+                # Otherwise a 90/270 degree turn resets CropBox and reveals margins.
+                media = page.mediabox
+                crop = page.cropbox
+                page.set_cropbox(fitz.Rect(media.x0, 0, media.x1, media.height))
+                visible = fitz.Rect(crop.x0 - media.x0, crop.y0,
+                                    crop.x1 - media.x0, crop.y1) * page.rotation_matrix
+                page.remove_rotation()
+                origin = page.cropbox_position
+                page.set_cropbox(fitz.Rect(visible.x0 + origin.x, visible.y0 + origin.y,
+                                          visible.x1 + origin.x, visible.y1 + origin.y))
+    except Exception:
+        doc.close()
+        raise
+    return doc
 
 
 def detect_pdf_category(pdf_path: str) -> Dict[str, Any]:
@@ -105,7 +139,7 @@ def detect_pdf_category(pdf_path: str) -> Dict[str, Any]:
     - comic_manga   (PDF漫画 / 画集)
     - pure_text     (纯文字 PDF 书籍)
     """
-    doc = fitz.open(pdf_path)
+    doc = _open_source_pdf(pdf_path)
     total = len(doc)
     if total == 0:
         doc.close()
@@ -1408,7 +1442,7 @@ def build_kpw6_epub(
       1264x1680 reformatted screens into a zero-margin full-screen EPUB with full TOC navigation
       for Tables, Figures, and Chapters!
     """
-    src_doc = fitz.open(input_pdf_path)
+    src_doc = _open_source_pdf(input_pdf_path)
     total_pages = len(src_doc)
     target_pages = get_target_page_list(total_pages, options)
     if not target_pages:
@@ -1533,6 +1567,23 @@ div.screen-box img {
             for step_i, pno in enumerate(target_pages, start=1):
                 if progress_cb:
                     progress_cb(step_i, limit_pages, f"正在智能提取并合并第 {pno+1} 页正文 ({step_i}/{limit_pages})...")
+                rule = (options.page_overrides or {}).get(str(pno), "auto")
+                if rule in ("whole_portrait", "whole_landscape"):
+                    # Preserve protected pages as images between reflowable sections.
+                    # A separate item also prevents merging text across this page.
+                    slices, _, _, _ = analyze_page_slices(src_doc[pno], pno, options)
+                    with fitz.open() as page_doc:
+                        _render_slices_to_doc(src_doc, pno, slices, page_doc, options)
+                        for page in page_doc:
+                            screens_count += 1
+                            image_rel = f"images/protected_{screens_count:04d}.png"
+                            pix = page.get_pixmap(matrix=fitz.Matrix(
+                                KPW6_PX_W / KPW6_PT_W, KPW6_PX_H / KPW6_PT_H),
+                                colorspace=fitz.csGRAY, alpha=False)
+                            zf.writestr(f"OEBPS/{image_rel}", pix.tobytes("png"), compress_type=zipfile.ZIP_STORED)
+                            manifest_items.append(f'<item id="protected_{screens_count:04d}" href="{image_rel}" media-type="image/png"/>')
+                            all_items.append(ExtractedParagraph(kind="page_image", text=image_rel, src_page=pno))
+                    continue
                 page_items = extract_structured_text_from_page(src_doc[pno], pno, trim_hf=options.trim_header_footer)
                 if all_items and page_items and all_items[-1].kind == "para" and page_items[0].kind == "para":
                     prev_t = all_items[-1].text
@@ -1550,13 +1601,18 @@ div.screen-box img {
             chapters: List[Dict[str, Any]] = []
             curr_chap = {"title": "正文开始", "paras": []}
             for item in all_items:
-                if item.kind == "chapter":
+                if item.kind == "page_image":
+                    if curr_chap["paras"] or curr_chap["title"] != "正文开始":
+                        chapters.append(curr_chap)
+                    chapters.append({"title": f"原书第 {item.src_page + 1} 页 · 整页", "paras": [], "image": item.text})
+                    curr_chap = {"title": "正文开始", "paras": []}
+                elif item.kind == "chapter":
                     if curr_chap["paras"] or curr_chap["title"] != "正文开始":
                         chapters.append(curr_chap)
                     curr_chap = {"title": item.text, "paras": []}
                 else:
                     curr_chap["paras"].append(item.text)
-            if curr_chap["paras"] or not chapters:
+            if curr_chap["paras"] or curr_chap["title"] != "正文开始" or not chapters:
                 chapters.append(curr_chap)
 
             chapters_count = len(chapters)
@@ -1567,6 +1623,12 @@ div.screen-box img {
                 cid = f"chap_{idx:03d}"
                 safe_title = html.escape(ch["title"])
                 paras_html = "\n".join(f"  <p>{html.escape(p)}</p>" for p in ch["paras"])
+                if ch.get("image"):
+                    body_class = ' class="full-screen-page"'
+                    body_html = f'<div class="screen-box"><img src="{ch["image"]}" alt="{safe_title}"/></div>'
+                else:
+                    body_class = ""
+                    body_html = f"<h2>{safe_title}</h2>\n{paras_html}"
                 xhtml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="zh-CN">
@@ -1575,9 +1637,8 @@ div.screen-box img {
   <title>{safe_title}</title>
   <link rel="stylesheet" type="text/css" href="style.css"/>
 </head>
-<body>
-  <h2>{safe_title}</h2>
-{paras_html}
+<body{body_class}>
+{body_html}
 </body>
 </html>"""
                 zf.writestr(f"OEBPS/{fname}", xhtml)
@@ -1752,7 +1813,7 @@ def build_kpw6_cbz(
     Package KPW6 Cover Page + all 1264x1680 KPW6-reformatted screens into a standard
     lossless .cbz (Comic Book ZIP) archive with ComicInfo.xml metadata.
     """
-    src_doc = fitz.open(input_pdf_path)
+    src_doc = _open_source_pdf(input_pdf_path)
     total_pages = len(src_doc)
     target_pages = get_target_page_list(total_pages, options)
     if not target_pages:
@@ -2382,7 +2443,7 @@ def build_kpw6_pdf(
     optimized PDF to output_pdf_path, including a dedicated un-sliced Cover Page on Page 1
     and complete PDF /Title & /Author metadata.
     """
-    src_doc = fitz.open(input_pdf_path)
+    src_doc = _open_source_pdf(input_pdf_path)
     out_doc = fitz.open()
 
     total_src_pages = len(src_doc)
@@ -2559,7 +2620,7 @@ def scan_document_highlights(input_pdf_path: str) -> List[Dict[str, Any]]:
     """
     highlights: List[Dict[str, Any]] = []
     try:
-        doc = fitz.open(input_pdf_path)
+        doc = _open_source_pdf(input_pdf_path)
         total = len(doc)
         scan_limit = min(total, 400)
         table_cap_re = re.compile(
@@ -2615,7 +2676,7 @@ def render_preview_comparison(
     """
     Generate high-definition base64 PNG previews and interactive slice metadata for the Web Studio.
     """
-    src_doc = fitz.open(input_pdf_path)
+    src_doc = _open_source_pdf(input_pdf_path)
     total_pages = len(src_doc)
     pno = max(0, min(total_pages - 1, page_num))
     page = src_doc[pno]
@@ -2738,7 +2799,7 @@ def render_hd_zoom_image(
     so when the user opens the Lightbox Magnifier and zooms to 1.5x / 2.2x / 3.0x, every single
     formula, table border, and scanned engineering curve is 100% razor-sharp with zero upscaling blur.
     """
-    src_doc = fitz.open(input_pdf_path)
+    src_doc = _open_source_pdf(input_pdf_path)
     total_pages = len(src_doc)
     pno = max(0, min(total_pages - 1, page_num))
     page = src_doc[pno]

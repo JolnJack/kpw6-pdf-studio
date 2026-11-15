@@ -35,7 +35,7 @@
 需要 **Python 3.10+**，建议在虚拟环境中安装依赖：
 
 ```bash
-git clone https://github.com/<你的用户名>/kpw6-pdf-studio.git
+git clone https://github.com/JolnJack/kpw6-pdf-studio.git
 cd kpw6-pdf-studio
 
 python3 -m venv .venv
@@ -55,6 +55,24 @@ python app.py
 - `--no-browser`（或设置环境变量 `KPW6_NO_BROWSER=1`）：仅启动后台服务，不自动弹开浏览器。
 - `--port-file <路径>`：将实际绑定端口写入文件，供桌面启动器读取。
 - `KPW6_DATA_DIR=<路径>`：自定义 `uploads/` 与 `outputs/` 数据根目录（PyInstaller 打包状态下默认写入 `~/Documents/KPW6_PDF_Studio`）。
+
+### 导出与文件校验
+- 每组导出结果保存在 `outputs/<独立标识>/`，重复导出或上传同名 PDF 都不会覆盖旧结果，已有下载链接继续有效。
+- 起始页超出文档页数、结束页早于起始页时会明确报错；结束页超过末页时按实际末页截取。
+- 流式 EPUB 中设置为「强制整页竖屏 / 横置 90°」的页面以图像保留版面，前后正文仍可自由调整字号。
+- 上传会先校验 PDF，损坏或需要密码的文件不会进入历史列表。旧版本遗留的损坏文件会被忽略，原文件仍保留在磁盘上。
+- 旋转页会在内存中统一坐标并保留原裁切范围，原始 PDF 不会被改写。依赖 `PyMuPDF >= 1.26.4` 的 [页面旋转规范化接口](https://pymupdf.readthedocs.io/en/latest/page.html#Page.remove_rotation)。
+
+### 回归测试
+安装依赖后，在项目目录运行：
+
+```bash
+python -m unittest discover -s tests -v
+# 前端异步请求测试需要 Node.js（应用本身无需 Node.js）：
+node --test tests/preview_race.test.cjs
+```
+
+测试使用临时目录；已安装 Calibre 时还会验证 AZW3 / MOBI 转换，否则跳过这项可选测试。
 
 ---
 
