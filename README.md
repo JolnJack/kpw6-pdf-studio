@@ -1,12 +1,34 @@
 # KPW6 PDF Studio
 
-面向 Kindle Paperwhite 6 与类似墨水屏设备的本地 PDF 排版工作台。支持双栏论文、图表书、扫描件、漫画和纯文字文档；处理在本机执行，输入文件不会被改写。
+**Kindle PDF 排版工具**，用于裁剪白边、放大正文、拆分双栏论文、处理扫描件和漫画，并将纯文字 PDF 转成可调字号的 EPUB。面向 Kindle Paperwhite 6 与类似墨水屏设备，处理在本机执行，原始 PDF 不会被改写。
 
-## 下载与使用
+## 下载与安装
 
-[下载安装包与 PDF 使用说明](https://github.com/JolnJack/kpw6-pdf-studio/releases/tag/v1.0.0-rc.1) · [在线阅读使用说明](docs/使用说明.md)
+按电脑类型下载一个安装包即可，**无需安装 Python 或 Node.js**。
 
-提供 Windows、Intel Mac 和 M 系列 Mac 三个版本。两个 Mac 版本均要求 macOS 14 或更新系统。当前为预发布版本，Mac 包尚未完成 Developer ID 签名及 Apple 公证；具体安装步骤与发布状态见下载页。
+| 你的电脑 | 下载 | 安装与启动 |
+| --- | --- | --- |
+| Windows（Intel / AMD，64 位） | [Windows 版](https://github.com/JolnJack/kpw6-pdf-studio/releases/download/v1.0.0-rc.1/Windows.zip) | 完整解压，双击 `双击启动_Kindle精排大师.bat`，保留全部文件 |
+| Intel Mac | [Intel Mac 版](https://github.com/JolnJack/kpw6-pdf-studio/releases/download/v1.0.0-rc.1/Mac-Intel.dmg) | 打开 DMG，拖入“应用程序”，再从“应用程序”启动 |
+| M 系列 Mac | [M 系列 Mac 版](https://github.com/JolnJack/kpw6-pdf-studio/releases/download/v1.0.0-rc.1/Mac-M.dmg) | 打开 DMG，拖入“应用程序”，再从“应用程序”启动 |
+
+Mac 芯片类型可在“苹果菜单 → 关于本机”查看。**两个 Mac 版本均需要 macOS 14 或更新系统。**
+
+[PDF 使用说明](https://github.com/JolnJack/kpw6-pdf-studio/releases/download/v1.0.0-rc.1/Guide.pdf) · [在线使用说明](docs/使用说明.md) · [版本与下载页](https://github.com/JolnJack/kpw6-pdf-studio/releases/tag/v1.0.0-rc.1)
+
+当前版本为 **v1.0.0-rc.1 预发布版**。Mac 包尚未完成 Developer ID 签名及 Apple 公证，可能被系统阻止打开；遇到提示请记录报错并反馈，软件不要求关闭系统安全功能。
+
+## 第一次使用
+
+1. 启动软件，等待浏览器自动打开排版工作台。这是软件的本机操作界面。
+2. 点击上传区域或拖入 PDF，再选择对应的文档类型。
+3. 使用默认参数查看预览，检查正文、图表、方向和阅读顺序。
+4. 选择 PDF、EPUB 等导出格式，点击“一键导出”。首次可先导出几页试读。
+5. 导出完成后，点击“打开导出目录”找到文件，再按设备支持的方式传书。
+
+预览和导出时请保持软件运行。这里的“上传”仅将文件交给本机软件处理，不会上传到本软件的云端。使用 Send to Kindle 等外部服务传书时，文件会另行交给相应服务。
+
+Mac 可通过顶部菜单栏的“📖 KPW6精排”重新打开工作台或退出软件。Windows 请在导出完成后关闭网页和启动时出现的命令窗口。
 
 ## 处理与导出
 
@@ -27,17 +49,33 @@ PDF 分析和重排包含启发式判断。请用左右预览校对正文、公�
 
 设备显示、Send to Kindle 转换、书架/锁屏封面和具体固件兼容性需要在实际设备上确认。按页数分卷不等于文件大小保证；云传前请检查每卷大小。
 
-## 本地运行
+<details>
+<summary>开发者说明：源码运行、测试与构建</summary>
 
-需要 Python 3.10 或更新版本。推荐单独虚拟环境：
+以下内容面向需要运行源码或自行构建的开发者。使用上方安装包无需执行这些命令。
+
+### 从源码运行
+
+需要 Python 3.10 或更新版本。推荐单独虚拟环境。
+
+macOS / Linux：
 
 ```bash
 git clone https://github.com/JolnJack/kpw6-pdf-studio.git
 cd kpw6-pdf-studio
 python3 -m venv .venv
-# macOS / Linux
 source .venv/bin/activate
-# Windows CMD 使用 .venv\Scripts\activate.bat
+python -m pip install -r requirements.txt
+python app.py
+```
+
+Windows CMD：
+
+```bat
+git clone https://github.com/JolnJack/kpw6-pdf-studio.git
+cd kpw6-pdf-studio
+py -3 -m venv .venv
+.venv\Scripts\activate.bat
 python -m pip install -r requirements.txt
 python app.py
 ```
@@ -54,7 +92,7 @@ python app.py
 
 HTTP 线程不直接调用 MuPDF。文档操作由一个独立子进程的主线程依次执行；进度查询仍可响应。退出会清理 PDF 子进程和本应用启动的转换器；处理进程意外退出后，可在下一次请求中重建。
 
-## 回归验证
+### 回归验证
 
 ```bash
 python -m pip install -r requirements-dev.txt
@@ -71,7 +109,7 @@ node --test tests/preview_race.test.cjs tests/frontend_release.test.cjs
 python packaging/smoke_frozen.py <后端可执行文件路径>
 ```
 
-## 构建 Windows 应用
+### 构建 Windows 应用
 
 Windows 上安装开发依赖后：
 
@@ -84,7 +122,7 @@ python packaging/build_windows.py
 
 也可在 GitHub **Actions → Build Windows Standalone EXE → Run workflow** 构建。工作流先运行测试，再装配、实际启动冻结 EXE 并通过 HTTP 校验预览及 PDF/EPUB/CBZ 导出，最后提供构建产物。这些产物不是自动发布的正式 Release。
 
-## 构建 macOS 应用
+### 构建 macOS 应用
 
 在目标架构的 Mac 上安装开发依赖：
 
@@ -95,11 +133,15 @@ python packaging/build_macos.py
 
 默认输出 `dist/macos/KPW6-PDF-Studio-<架构>.zip`，内含完整的 `KPW6 PDF Studio.app`。脚本在本地临时目录装配 `Info.plist`、Cocoa 启动器、完整后端依赖、图标、对应源码及许可证，完成 ad-hoc 签名，并再次解压校验签名。最低系统版本依据实际 Python/依赖 wheel 的部署要求生成。
 
+构建脚本输出 ZIP；上方下载区的 DMG 是由已验证应用另行封装的安装映像。
+
 建议解压到本地目录使用；部分同步目录会附加 Finder 元数据，影响应用签名校验。ZIP不携带这些扩展属性。
 
 可用 `--work-dir` 与 `--output-dir` 指定隔离构建目录；输出目标应为空。Intel 与 Apple Silicon 应分别在相应环境构建和验收。也可手动运行 Actions 中的 `Build macOS Apps` 工作流，在两种原生架构上构建，并检查解压后的签名、依赖架构、预览和导出。
 
 **本地 ad-hoc 签名不等于 Developer ID 签名或 Apple 公证。** 面向外部用户分发前，仍需完成相应签名、公证、首次启动和退出验收；本项目不要求用户关闭系统安全功能。
+
+</details>
 
 ## 许可与对应源码
 
