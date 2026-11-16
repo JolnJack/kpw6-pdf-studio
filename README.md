@@ -2,6 +2,12 @@
 
 面向 Kindle Paperwhite 6 与类似墨水屏设备的本地 PDF 排版工作台。支持双栏论文、图表书、扫描件、漫画和纯文字文档；处理在本机执行，输入文件不会被改写。
 
+## 下载与使用
+
+[下载安装包与 PDF 使用说明](https://github.com/JolnJack/kpw6-pdf-studio/releases/tag/v1.0.0-rc.1) · [在线阅读使用说明](docs/使用说明.md)
+
+提供 Windows、Intel Mac 和 M 系列 Mac 三个版本。两个 Mac 版本均要求 macOS 14 或更新系统。当前为预发布版本，Mac 包尚未完成 Developer ID 签名及 Apple 公证；具体安装步骤与发布状态见下载页。
+
 ## 处理与导出
 
 - **双栏论文**：分析通栏与左右栏，分屏放大；按文字方向处理侧向图表。
