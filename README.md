@@ -91,7 +91,7 @@ python packaging/build_macos.py
 
 建议解压到本地目录使用；部分同步目录会附加 Finder 元数据，影响应用签名校验。ZIP不携带这些扩展属性。
 
-可用 `--work-dir` 与 `--output-dir` 指定隔离构建目录；输出目标应为空。Intel 与 Apple Silicon 应分别在相应环境构建和验收。
+可用 `--work-dir` 与 `--output-dir` 指定隔离构建目录；输出目标应为空。Intel 与 Apple Silicon 应分别在相应环境构建和验收。也可手动运行 Actions 中的 `Build macOS Apps` 工作流，在两种原生架构上构建，并检查解压后的签名、依赖架构、预览和导出。
 
 **本地 ad-hoc 签名不等于 Developer ID 签名或 Apple 公证。** 面向外部用户分发前，仍需完成相应签名、公证、首次启动和退出验收；本项目不要求用户关闭系统安全功能。
 

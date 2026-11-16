@@ -1,0 +1,90 @@
+name: Build macOS Apps
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: x86_64
+          - runner: macos-15
+            arch: arm64
+    env:
+      EXPECTED_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Confirm native build architecture
+        run: python -c 'import os, platform; assert platform.machine() == os.environ["EXPECTED_ARCH"], platform.machine()'
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Python regressions
+        run: python -u -m unittest discover -s tests -v
+      - name: Frontend regressions
+        run: node --test tests/preview_race.test.cjs tests/frontend_release.test.cjs
+      - name: Build signed app archive
+        run: python packaging/build_macos.py
+      - name: Verify extracted app and native libraries
+        shell: bash
+        run: |
+          ditto -x -k "dist/macos/KPW6-PDF-Studio-${EXPECTED_ARCH}.zip" "${RUNNER_TEMP}/kpw6-verify"
+          codesign --verify --deep --strict "${RUNNER_TEMP}/kpw6-verify/KPW6 PDF Studio.app"
+          python - <<'PY'
+          import json, os, pathlib, platform, plistlib, subprocess
+          app = pathlib.Path(os.environ['RUNNER_TEMP']) / 'kpw6-verify' / 'KPW6 PDF Studio.app'
+          expected = os.environ['EXPECTED_ARCH']
+          binaries = {}
+          magic = {b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf',
+                   b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca',
+                   b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca'}
+          for path in app.rglob('*'):
+              if path.is_symlink() or not path.is_file():
+                  continue
+              with path.open('rb') as stream:
+                  if stream.read(4) not in magic:
+                      continue
+              arches = subprocess.check_output(['lipo', '-archs', str(path)], text=True).split()
+              assert expected in arches, (path, arches)
+              binaries[str(path.relative_to(app))] = arches
+          assert 'Contents/MacOS/KPW6StudioLauncher' in binaries
+          assert 'Contents/Resources/server/KPW6StudioServer' in binaries
+          info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+          manifest = json.loads((app / 'Contents/Resources/RELEASE_MANIFEST.json').read_text())
+          assert manifest['base_commit'] == os.environ['GITHUB_SHA'], manifest
+          assert not manifest['working_tree_modified'], manifest
+          report = {'architecture': expected, 'system': platform.platform(),
+                    'minimum_macos': info['LSMinimumSystemVersion'], 'binaries': binaries,
+                    'commit': manifest['base_commit'], 'signature_verified': True}
+          pathlib.Path('build/macos-validation.json').write_text(json.dumps(report, indent=2))
+          print(f"Verified {len(binaries)} native binaries for {expected}; macOS {info['LSMinimumSystemVersion']}+")
+          PY
+      - name: Exercise extracted app backend and exports
+        run: python packaging/smoke_frozen.py "${RUNNER_TEMP}/kpw6-verify/KPW6 PDF Studio.app/Contents/Resources/server/KPW6StudioServer" --report build/frozen-smoke.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KPW6-PDF-Studio-macOS-${{ matrix.arch }}
+          path: dist/macos/*.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macOS-${{ matrix.arch }}-validation
+          path: |
+            build/macos-validation.json
+            build/frozen-smoke.json
+          if-no-files-found: ignore
