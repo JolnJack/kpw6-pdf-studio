@@ -7,9 +7,30 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
 APP_NAME = "KPW6 PDF Studio.app"
+
+
+def _run_hdiutil_with_retry(cmd: list[str], cleanup_path: Path | None = None, attempts: int = 6) -> None:
+    """Retry transient macOS hdiutil 'Resource busy' errors caused by Spotlight/XProtect."""
+    last_err: subprocess.CalledProcessError | None = None
+    for attempt in range(1, attempts + 1):
+        if cleanup_path is not None and cleanup_path.exists():
+            cleanup_path.unlink()
+        proc = subprocess.run(cmd, text=True, capture_output=True)
+        if proc.returncode == 0:
+            return
+        last_err = subprocess.CalledProcessError(proc.returncode, cmd, output=proc.stdout, stderr=proc.stderr)
+        combined = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+        if attempt < attempts and ("resource busy" in combined.lower() or "couldn't unmount" in combined.lower()):
+            time.sleep(2.0 * attempt)
+            continue
+        sys.stderr.write(combined)
+        raise last_err
+    assert last_err is not None
+    raise last_err
 
 
 def build_dmg_from_app(app_path: Path, dmg_output: Path, volume_name: str = "KPW6 PDF Studio") -> Path:
@@ -29,7 +50,7 @@ def build_dmg_from_app(app_path: Path, dmg_output: Path, volume_name: str = "KPW
         subprocess.run(["codesign", "--verify", "--deep", "--strict", str(staged_app)], check=True)
         (stage / "Applications").symlink_to("/Applications")
 
-        subprocess.run([
+        _run_hdiutil_with_retry([
             "hdiutil", "create",
             "-volname", volume_name,
             "-srcfolder", str(stage),
@@ -37,15 +58,15 @@ def build_dmg_from_app(app_path: Path, dmg_output: Path, volume_name: str = "KPW
             "-format", "UDZO",
             "-imagekey", "zlib-level=9",
             str(dmg_output),
-        ], check=True)
+        ], cleanup_path=dmg_output)
 
     with tempfile.TemporaryDirectory(prefix="kpw6-dmg-verify-") as mnt_raw:
         mnt = Path(mnt_raw)
-        subprocess.run([
+        _run_hdiutil_with_retry([
             "hdiutil", "attach", str(dmg_output),
             "-readonly", "-nobrowse", "-noverify", "-noautoopen",
             "-mountpoint", str(mnt),
-        ], check=True)
+        ])
         try:
             mounted_app = mnt / APP_NAME
             if not mounted_app.is_dir():

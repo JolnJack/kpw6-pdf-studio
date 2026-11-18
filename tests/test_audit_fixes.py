@@ -388,6 +388,35 @@ class PackagingSlimAndGuideTests(unittest.TestCase):
                 self.assertIn("KPW6 PDF Studio.app", full_text)
                 self.assertNotIn("Kindle精排大师.app", full_text)
 
+    def test_hdiutil_retry_handles_transient_resource_busy(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(repo_root / "packaging"))
+        import build_dmg
+
+        class _FakeProc:
+            def __init__(self, returncode, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        with tempfile.TemporaryDirectory() as td:
+            partial_dmg = Path(td) / "partial.dmg"
+            partial_dmg.write_bytes(b"stale")
+            calls = []
+
+            def fake_run(cmd, text=True, capture_output=True):
+                calls.append(partial_dmg.exists())
+                if len(calls) == 1:
+                    partial_dmg.write_bytes(b"half")
+                    return _FakeProc(1, stderr="hdiutil: create failed - Resource busy\n")
+                partial_dmg.write_bytes(b"complete")
+                return _FakeProc(0)
+
+            with patch.object(build_dmg.subprocess, "run", side_effect=fake_run), patch.object(build_dmg.time, "sleep"):
+                build_dmg._run_hdiutil_with_retry(["hdiutil", "create"], cleanup_path=partial_dmg, attempts=3)
+            self.assertEqual(calls, [False, False])
+            self.assertEqual(partial_dmg.read_bytes(), b"complete")
+
 
 if __name__ == "__main__":
     unittest.main()
