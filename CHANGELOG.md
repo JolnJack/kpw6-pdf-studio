@@ -4,6 +4,12 @@ All notable changes to **KPW6 PDF Studio** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/).
 
+## [1.0.1] - 2026-11-18
+
+### Fixed
+- Initialized the browser session token correctly so previews, uploads, removals and exports work on a fresh page. The workbench HTML is served with `Cache-Control: no-store` to prevent reusing a token from a previous app session.
+- Added a fresh browser test of preview, upload, removal, and PDF, EPUB and CBZ exports against the actual Windows ZIP and both macOS disk images before publication.
+
 ## [1.0.0] - 2026-11-18
 
 ### Architecture & Packaging

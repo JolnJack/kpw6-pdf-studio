@@ -5,6 +5,7 @@ from collections import OrderedDict
 import io
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -230,9 +231,13 @@ class WebSecurityAndServiceAuditTests(unittest.TestCase):
         )
         self.assertEqual(r_no_tok.status_code, 403)
 
-        # Same-origin browser POST with valid X-KPW6-Token succeeds, and decoupled static assets load
-        html_page = self.client.get("/", headers={"Host": "127.0.0.1:8765"}).data.decode("utf-8")
-        self.assertIn(self.module.APP_CSRF_TOKEN, html_page)
+        # Use the token assigned to the browser's public property in the served page.
+        homepage = self.client.get("/", headers={"Host": "127.0.0.1:8765"})
+        token_assignment = re.search(
+            r'window\.__KPW6_CSRF_TOKEN__\s*=\s*"([A-Za-z0-9_-]+)"', homepage.get_data(as_text=True)
+        )
+        self.assertIsNotNone(token_assignment, "The served page must initialize the browser session token")
+        self.assertTrue(homepage.cache_control.no_store)
         with self.client.get("/static/styles.css", headers={"Host": "127.0.0.1:8765"}) as r_css:
             self.assertEqual(r_css.status_code, 200)
         with self.client.get("/static/app.js", headers={"Host": "127.0.0.1:8765"}) as r_js:
@@ -244,7 +249,7 @@ class WebSecurityAndServiceAuditTests(unittest.TestCase):
                 "Host": "127.0.0.1:8765",
                 "Origin": "http://127.0.0.1:8765",
                 "Sec-Fetch-Site": "same-origin",
-                "X-KPW6-Token": self.module.APP_CSRF_TOKEN,
+                "X-KPW6-Token": token_assignment.group(1),
             },
         )
         self.assertEqual(r_ok.status_code, 200)
@@ -352,7 +357,7 @@ class WebSecurityAndServiceAuditTests(unittest.TestCase):
             self.assertTrue(cancel_res.get_json()["cancelled"])
             t.join(timeout=8.0)
             self.assertFalse(t.is_alive())
-            self.assertTrue(export_result["json"].get("cancelled"))
+            self.assertTrue(export_result["json"].get("cancelled"), export_result)
 
         # Subsequent normal PDF export recovers automatically with a fresh worker
         followup = self.client.post("/api/export_unified", json={

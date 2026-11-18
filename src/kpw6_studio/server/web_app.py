@@ -202,7 +202,11 @@ def _get_highlights(fid: str, pdf_path: str):
 @app.route("/")
 def index():
     html_doc = (WEB_DIR / "index.html").read_text(encoding="utf-8")
-    return Response(html_doc.replace("__KPW6_CSRF_TOKEN__", APP_CSRF_TOKEN), mimetype="text/html; charset=utf-8")
+    return Response(
+        html_doc.replace("__KPW6_CSRF_TOKEN_VALUE__", APP_CSRF_TOKEN),
+        mimetype="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.route("/api/files", methods=["GET"])

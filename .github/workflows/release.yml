@@ -24,10 +24,10 @@ jobs:
           node-version: "22"
       - name: Install dependencies
         run: python -m pip install -e ".[dev]"
-      - name: Run regressions
-        run: |
-          python -u -m unittest discover -s tests -v
-          node --test tests/preview_race.test.cjs tests/frontend_release.test.cjs
+      - name: Python regressions
+        run: python -u -m unittest discover -s tests -v
+      - name: Frontend regressions
+        run: node --test tests/preview_race.test.cjs tests/frontend_release.test.cjs
       - name: Build Windows distribution and ZIP
         run: python packaging/windows/build_windows.py --zip-output dist/Windows.zip
       - name: Verify bundle hygiene and manifest provenance
@@ -44,8 +44,16 @@ jobs:
           assert not manifest['working_tree_modified'], manifest
           assert pathlib.Path('dist/Windows.zip').is_file()
           PY
-      - name: Smoke-test frozen executable
-        run: python packaging/smoke_frozen.py dist/Release/KindleKPW6Studio/KindleKPW6Studio.exe --report build/frozen-smoke.json
+      - name: Install browser for package verification
+        shell: bash
+        run: |
+          python -m pip install "playwright==1.65.2"
+          python -m playwright install chromium --only-shell
+      - name: Verify the workbench from the Windows download
+        shell: bash
+        run: |
+          python -m zipfile -e dist/Windows.zip build/windows-smoke
+          python packaging/smoke_frozen.py build/windows-smoke/KindleKPW6Studio/KindleKPW6Studio.exe --browser
       - uses: actions/upload-artifact@v4
         with:
           name: release-windows
@@ -124,8 +132,17 @@ jobs:
           assert not manifest['working_tree_modified'], manifest
           print(f"Verified {len(binaries)} native binaries for {expected}; macOS {info['LSMinimumSystemVersion']}+")
           PY
-      - name: Smoke-test frozen macOS server
-        run: python packaging/smoke_frozen.py "${RUNNER_TEMP}/kpw6-verify/KPW6 PDF Studio.app/Contents/Resources/server/KPW6StudioServer" --report build/frozen-smoke.json
+      - name: Install browser for package verification
+        run: |
+          python -m pip install "playwright==1.65.2"
+          python -m playwright install chromium --only-shell
+      - name: Verify the workbench from the macOS download
+        shell: bash
+        run: |
+          mount_dir="$(mktemp -d "${RUNNER_TEMP}/kpw6-release.XXXXXX")"
+          hdiutil attach "dist/macos/${ASSET_NAME}" -readonly -nobrowse -mountpoint "$mount_dir"
+          trap 'hdiutil detach "$mount_dir"' EXIT
+          python packaging/smoke_frozen.py "$mount_dir/KPW6 PDF Studio.app/Contents/Resources/server/KPW6StudioServer" --browser
       - uses: actions/upload-artifact@v4
         with:
           name: release-macos-${{ matrix.arch }}

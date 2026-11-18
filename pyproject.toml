@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kpw6-pdf-studio"
-version = "1.0.0"
+version = "1.0.1"
 description = "Local PDF layout, 2-column splitting, scan enhancement, and EPUB/CBZ studio for Kindle Paperwhite 6 and e-ink readers."
 readme = "README.md"
 requires-python = ">=3.10"
