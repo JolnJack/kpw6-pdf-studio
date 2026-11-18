@@ -29,6 +29,7 @@ jobs:
       - name: Install package and dev dependencies
         run: python -m pip install -e ".[dev]"
       - name: Verify repository root layout hygiene
+        shell: bash
         run: |
           python - <<'PY'
           import pathlib
