@@ -1,8 +1,10 @@
 import argparse
 import atexit
+from collections import OrderedDict
 import math
 import os
 import re
+import secrets
 import signal
 import socket
 import subprocess
@@ -24,28 +26,28 @@ if __name__ == "__main__" and "--pdf-worker" in sys.argv:
     run_worker()
     raise SystemExit(0)
 
-from flask import Flask, request, jsonify, send_file, render_template_string
+from flask import Flask, Response, request, jsonify, send_file
 from werkzeug.exceptions import HTTPException
 
 from pdf_engine import (
     ProcessOptions,
     get_target_page_list,
 )
-from pdf_service import PDF_SERVICE, worker_function
+from pdf_service import EXPORT_PDF_SERVICE, ExportCancelledError, PDF_SERVICE, worker_function
 from conversion_runner import cancel_all_conversions
 from local_server import LoopbackWSGIServer
 
-# The HTTP process only handles options, files and progress. Native document
-# objects never cross threads or process boundaries.
-generate_demo_pdfs = worker_function("generate_demo_pdfs")
-build_kpw6_pdf = worker_function("build_kpw6_pdf")
-build_kpw6_epub = worker_function("build_kpw6_epub")
-build_kpw6_cbz = worker_function("build_kpw6_cbz")
-convert_epub_via_calibre = worker_function("convert_epub_via_calibre")
-render_preview_comparison = worker_function("render_preview_comparison")
-render_hd_zoom_image = worker_function("render_hd_zoom_image")
-detect_pdf_category = worker_function("detect_pdf_category")
-scan_document_highlights = worker_function("scan_document_highlights")
+# Interactive preview/inspection uses PDF_SERVICE; heavy exports use EXPORT_PDF_SERVICE
+# so long exports or Calibre runs do not freeze page previews.
+generate_demo_pdfs = worker_function("generate_demo_pdfs", PDF_SERVICE)
+build_kpw6_pdf = worker_function("build_kpw6_pdf", EXPORT_PDF_SERVICE)
+build_kpw6_epub = worker_function("build_kpw6_epub", EXPORT_PDF_SERVICE)
+build_kpw6_cbz = worker_function("build_kpw6_cbz", EXPORT_PDF_SERVICE)
+convert_epub_via_calibre = worker_function("convert_epub_via_calibre", EXPORT_PDF_SERVICE)
+render_preview_comparison = worker_function("render_preview_comparison", PDF_SERVICE)
+render_hd_zoom_image = worker_function("render_hd_zoom_image", PDF_SERVICE)
+detect_pdf_category = worker_function("detect_pdf_category", PDF_SERVICE)
+scan_document_highlights = worker_function("scan_document_highlights", PDF_SERVICE)
 
 
 def _resolve_data_root() -> str:
@@ -80,6 +82,13 @@ app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024  # 300 MB max PDF
 
 FILES = {}
 HIGHLIGHTS_CACHE = {}
+CUSTOM_COVERS = {}
+EXPORT_JOBS = OrderedDict()
+MAX_EXPORT_JOBS = 64
+APP_CSRF_TOKEN = secrets.token_urlsafe(24)
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_UPLOAD_PDF_RE = re.compile(r"^([0-9a-f]{8})_(.+\.pdf)$", re.IGNORECASE)
+_UPLOAD_COVER_RE = re.compile(r"^cover_([0-9a-f]{8})_(.+)$", re.IGNORECASE)
 
 for key, path in DEMO_PATHS.items():
     FILES[f"demo_{key}"] = {
@@ -95,24 +104,34 @@ def _validate_pdf(pdf_path: str):
 
 
 def _scan_uploads_dir():
-    """Register any PDFs in UPLOAD_DIR so server restarts or page refreshes keep user files accessible."""
+    """Register any PDFs and custom covers in UPLOAD_DIR so restarts keep user files accessible."""
+    if not os.path.isdir(UPLOAD_DIR):
+        return
     for fname in sorted(os.listdir(UPLOAD_DIR)):
-        if fname.lower().endswith(".pdf") and "_" in fname:
-            fid, orig_name = fname.split("_", 1)
-            full_p = os.path.join(UPLOAD_DIR, fname)
-            if os.path.isfile(full_p):
-                if fid not in FILES:
-                    try:
-                        _validate_pdf(full_p)
-                    except Exception:
-                        # Ignore damaged files left by older versions without deleting them.
-                        continue
-                FILES[fid] = {
-                    "path": full_p,
-                    "name": orig_name,
-                    "is_demo": False,
-                    "mtime": os.path.getmtime(full_p),
-                }
+        full_p = os.path.join(UPLOAD_DIR, fname)
+        if not os.path.isfile(full_p):
+            continue
+        m_cover = _UPLOAD_COVER_RE.match(fname)
+        if m_cover:
+            cid = m_cover.group(1).lower()
+            if cid not in CUSTOM_COVERS:
+                CUSTOM_COVERS[cid] = full_p
+            continue
+        m_pdf = _UPLOAD_PDF_RE.match(fname)
+        if m_pdf:
+            fid, orig_name = m_pdf.group(1).lower(), m_pdf.group(2)
+            if fid not in FILES:
+                try:
+                    _validate_pdf(full_p)
+                except Exception:
+                    # Ignore damaged files left by older versions without deleting them.
+                    continue
+            FILES[fid] = {
+                "path": full_p,
+                "name": orig_name,
+                "is_demo": False,
+                "mtime": os.path.getmtime(full_p),
+            }
 
 
 _scan_uploads_dir()
@@ -1027,6 +1046,7 @@ HTML_PAGE = """<!DOCTYPE html>
         <div style="display:flex;align-items:center;gap:10px;font-size:12px;">
           <span id="exportProgressEta" style="color:#93c5fd;">已用时 0.0s · 正在估算剩余时间...</span>
           <span id="exportProgressPct" style="background:#3b82f6;color:#fff;padding:2px 8px;border-radius:999px;font-weight:700;font-size:11.5px;">0%</span>
+          <button type="button" class="btn btn-sm" id="cancelExportBtn" style="border-color:#ef4444;color:#fca5a5;padding:3px 9px;" onclick="cancelActiveExport()">⏹ 取消</button>
         </div>
       </div>
       <div style="width:100%;height:9px;background:#0f172a;border-radius:999px;overflow:hidden;border:1px solid #334155;">
@@ -1201,6 +1221,7 @@ HTML_PAGE = """<!DOCTYPE html>
 </div>
 
 <script>
+const KPW6_CSRF_TOKEN = "__KPW6_CSRF_TOKEN__";
 let currentFileId = "demo_academic_2col";
 let currentMode = "academic_2col";
 let currentPage = 0;
@@ -1218,6 +1239,7 @@ let currentHasCoverScreen = false;
 let currentExportFormat = "epub_layout";
 let userManuallyChoseFormat = false;
 let currentSplitVolumesEvery = 0;
+let activeExportJobId = "";
 let pageOverridesByFile = {};
 let previewRequestSerial = 0;
 let fileSelectionSerial = 0;
@@ -1402,13 +1424,53 @@ function renderUploadedPills(uploadedList) {
   }
   wrap.style.display = "flex";
   uploadedList.forEach(item => {
+    const group = document.createElement("span");
+    group.style.display = "inline-flex";
+    group.style.alignItems = "center";
+    group.style.gap = "2px";
     const btn = document.createElement("button");
     btn.className = "pill" + (item.file_id === currentFileId ? " active" : "");
     btn.id = "pill-" + item.file_id;
     btn.innerText = "📘 " + item.name;
     btn.onclick = () => switchToUploadedFile(item.file_id, item.name);
-    container.appendChild(btn);
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "pill";
+    delBtn.style.padding = "4px 6px";
+    delBtn.style.color = "#fca5a5";
+    delBtn.innerText = "✕";
+    delBtn.title = "从上传记录中移除此 PDF";
+    delBtn.onclick = (e) => {
+      e.stopPropagation();
+      deleteUploadedFile(item.file_id);
+    };
+    group.appendChild(btn);
+    group.appendChild(delBtn);
+    container.appendChild(group);
   });
+}
+
+async function deleteUploadedFile(fileId) {
+  try {
+    const res = await fetch("/api/delete_file", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-KPW6-Token": KPW6_CSRF_TOKEN },
+      body: JSON.stringify({ file_id: fileId })
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || "无法移除文件");
+    delete pageOverridesByFile[fileId];
+    renderUploadedPills(data.uploaded || []);
+    if (currentFileId === fileId) {
+      if (data.uploaded && data.uploaded.length > 0) {
+        await switchToUploadedFile(data.uploaded[0].file_id, data.uploaded[0].name);
+      } else {
+        await loadDemo("demo_academic_2col", "academic_2col");
+      }
+    }
+  } catch (err) {
+    alert("移除文件失败：" + (err.message || err));
+  }
 }
 
 function highlightActiveFilePill() {
@@ -1477,7 +1539,11 @@ async function handleFileUpload(file) {
   form.append("file", file);
   let data;
   try {
-    const res = await fetch("/api/upload", { method: "POST", body: form });
+    const res = await fetch("/api/upload", {
+      method: "POST",
+      headers: { "X-KPW6-Token": KPW6_CSRF_TOKEN },
+      body: form
+    });
     data = await res.json();
     if (selectionId !== fileSelectionSerial) return;
     if (!res.ok || data.error) throw new Error(data.error || "无法上传 PDF");
@@ -1619,7 +1685,11 @@ async function handleCoverUpload(file) {
   const form = new FormData();
   form.append("file", file);
   try {
-    const res = await fetch("/api/upload_cover", { method: "POST", body: form });
+    const res = await fetch("/api/upload_cover", {
+      method: "POST",
+      headers: { "X-KPW6-Token": KPW6_CSRF_TOKEN },
+      body: form
+    });
     const data = await res.json();
     if (uploadId !== coverUploadSerial) return;
     if (!res.ok || data.error || !data.cover_id) {
@@ -1707,7 +1777,7 @@ async function refreshPreview(targetScreenIdx = 0) {
     const payload = getOptionsPayload();
     const res = await fetch("/api/preview", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-KPW6-Token": KPW6_CSRF_TOKEN },
       body: JSON.stringify(payload)
     });
     const data = await res.json();
@@ -1909,7 +1979,7 @@ async function openLightbox(src, title, targetType = "kpw6", screenIdx = 0) {
     };
     const res = await fetch("/api/preview_hd", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-KPW6-Token": KPW6_CSRF_TOKEN },
       body: JSON.stringify(payload),
     });
     const data = await res.json();
@@ -1992,11 +2062,14 @@ async function exportSelectedFormat(overrideFormat = null) {
   btn.disabled = true;
 
   const jobId = "job_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
+  activeExportJobId = jobId;
   const progPanel = document.getElementById("exportProgressPanel");
   const progTitle = document.getElementById("exportProgressTitle");
   const progEta = document.getElementById("exportProgressEta");
   const progPct = document.getElementById("exportProgressPct");
   const progFill = document.getElementById("exportProgressBarFill");
+  const cancelBtn = document.getElementById("cancelExportBtn");
+  if (cancelBtn) cancelBtn.disabled = false;
 
   progPanel.style.display = "flex";
   progTitle.innerText = "正在启动 KPW6 排版与封面引擎...";
@@ -2030,11 +2103,15 @@ async function exportSelectedFormat(overrideFormat = null) {
     };
     const res = await fetch("/api/export_unified", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-KPW6-Token": KPW6_CSRF_TOKEN },
       body: JSON.stringify(payload)
     });
     const data = await res.json();
     clearInterval(pollTimer);
+    if (data.cancelled) {
+      progPanel.style.display = "none";
+      return;
+    }
     if (data.error) {
       progPanel.style.display = "none";
       alert("导出失败：" + data.error);
@@ -2102,14 +2179,33 @@ async function exportSelectedFormat(overrideFormat = null) {
     progPanel.style.display = "none";
     alert("导出异常：" + (err && err.message ? err.message : err));
   } finally {
+    if (activeExportJobId === jobId) activeExportJobId = "";
     clearInterval(pollTimer);
     btn.innerText = oldText;
     btn.disabled = false;
   }
 }
 
+async function cancelActiveExport() {
+  if (!activeExportJobId) return;
+  const cancelBtn = document.getElementById("cancelExportBtn");
+  if (cancelBtn) cancelBtn.disabled = true;
+  document.getElementById("exportProgressTitle").innerText = "⏹ 正在中止导出任务...";
+  try {
+    await fetch("/api/cancel_export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-KPW6-Token": KPW6_CSRF_TOKEN },
+      body: JSON.stringify({ job_id: activeExportJobId })
+    });
+  } catch (e) {}
+}
+
 async function openOutputFolder() {
-  await fetch("/api/open_folder", { method: "POST" });
+  await fetch("/api/open_folder", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-KPW6-Token": KPW6_CSRF_TOKEN },
+    body: "{}"
+  });
 }
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -2121,8 +2217,46 @@ window.addEventListener("DOMContentLoaded", () => {
 """
 
 
-CUSTOM_COVERS = {}
-EXPORT_JOBS = {}
+def _set_export_job(job_id: str, info: dict) -> None:
+    EXPORT_JOBS[job_id] = info
+    EXPORT_JOBS.move_to_end(job_id)
+    if len(EXPORT_JOBS) > MAX_EXPORT_JOBS:
+        for old_id in list(EXPORT_JOBS.keys()):
+            if len(EXPORT_JOBS) <= MAX_EXPORT_JOBS:
+                break
+            if EXPORT_JOBS[old_id].get("status") != "running":
+                EXPORT_JOBS.pop(old_id, None)
+
+
+def _coerce_bool(value, default: bool, name: str) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("true", "1"):
+            return True
+        if low in ("false", "0"):
+            return False
+    raise ValueError(f"参数 {name} 必须是布尔值。")
+
+
+def _coerce_int(value, default: int, name: str) -> int:
+    if value is None:
+        raise ValueError(f"参数 {name} 必须是整数。")
+    if isinstance(value, bool):
+        raise ValueError(f"参数 {name} 必须是整数。")
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            raise ValueError(f"参数 {name} 必须是整数。")
+        return int(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"参数 {name} 必须是整数。") from exc
 
 
 def _parse_options(data: dict) -> ProcessOptions:
@@ -2138,6 +2272,8 @@ def _parse_options(data: dict) -> ProcessOptions:
     }
     for name, (lower, upper) in numeric_ranges.items():
         if name in data:
+            if isinstance(data[name], bool):
+                raise ValueError(f"参数 {name} 必须是有效数字。")
             try:
                 value = float(data[name])
             except (TypeError, ValueError) as exc:
@@ -2148,7 +2284,7 @@ def _parse_options(data: dict) -> ProcessOptions:
                 raise ValueError(f"参数 {name} 必须是整数。")
     if data.get("cover_mode", "smart_card") not in ("smart_card", "first_page", "custom_image", "none"):
         raise ValueError("请选择支持的封面模式。")
-    cov_id = data.get("custom_cover_id", "")
+    cov_id = str(data.get("custom_cover_id", "") or "").lower()
     cov_path = CUSTOM_COVERS.get(cov_id) if cov_id else None
     raw_start = data.get("start_page", 1)
     try:
@@ -2173,22 +2309,22 @@ def _parse_options(data: dict) -> ProcessOptions:
 
     return ProcessOptions(
         mode=data.get("mode", "academic_2col"),
-        split_pages=bool(data.get("split_pages", True)),
-        landscape_2x=bool(data.get("landscape_2x", False)),
-        trim_header_footer=bool(data.get("trim_header_footer", True)),
-        enhance_contrast=bool(data.get("enhance_contrast", False)),
-        clean_spine_shadow=bool(data.get("clean_spine_shadow", True)),
-        remove_watermark=bool(data.get("remove_watermark", False)),
-        auto_deskew=bool(data.get("auto_deskew", False)),
+        split_pages=_coerce_bool(data.get("split_pages"), True, "split_pages"),
+        landscape_2x=_coerce_bool(data.get("landscape_2x"), False, "landscape_2x"),
+        trim_header_footer=_coerce_bool(data.get("trim_header_footer"), True, "trim_header_footer"),
+        enhance_contrast=_coerce_bool(data.get("enhance_contrast"), False, "enhance_contrast"),
+        clean_spine_shadow=_coerce_bool(data.get("clean_spine_shadow"), True, "clean_spine_shadow"),
+        remove_watermark=_coerce_bool(data.get("remove_watermark"), False, "remove_watermark"),
+        auto_deskew=_coerce_bool(data.get("auto_deskew"), False, "auto_deskew"),
         gamma_strength=float(data.get("gamma_strength", 0.55)),
         margin_Percent=float(data.get("margin_Percent", 2.5)),
-        comic_split_spread=bool(data.get("comic_split_spread", True)),
-        manga_rtl=bool(data.get("manga_rtl", True)),
-        comic_full_bleed=bool(data.get("comic_full_bleed", True)),
+        comic_split_spread=_coerce_bool(data.get("comic_split_spread"), True, "comic_split_spread"),
+        manga_rtl=_coerce_bool(data.get("manga_rtl"), True, "manga_rtl"),
+        comic_full_bleed=_coerce_bool(data.get("comic_full_bleed"), True, "comic_full_bleed"),
         reflow_font_size=float(data.get("reflow_font_size", 13.5)),
         line_spacing=float(data.get("line_spacing", 1.65)),
         dpi_preset=int(data.get("dpi_preset", 450)),
-        vector_lossless=bool(data.get("vector_lossless", True)),
+        vector_lossless=_coerce_bool(data.get("vector_lossless"), True, "vector_lossless"),
         stroke_boldness=int(data.get("stroke_boldness", 0)),
         sharpen_strength=float(data.get("sharpen_strength", 1.60)),
         cover_mode=str(data.get("cover_mode", "smart_card")),
@@ -2203,7 +2339,39 @@ def _parse_options(data: dict) -> ProcessOptions:
 
 
 @app.before_request
-def _validate_json_request():
+def _validate_local_and_json_request():
+    req_host = urllib.parse.urlsplit("//" + (request.host or ""))
+    if (req_host.hostname or "").lower() not in _LOOPBACK_HOSTS:
+        return jsonify({"error": "拒绝非本机回环 Host 访问。"}), 403
+
+    if request.path.startswith("/api/"):
+        sec_site = (request.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if sec_site and sec_site not in {"same-origin", "none"}:
+            return jsonify({"error": "拒绝跨站请求访问本地服务。"}), 403
+
+        origin = (request.headers.get("Origin") or "").strip()
+        if origin:
+            if origin.lower() == "null":
+                return jsonify({"error": "拒绝匿名源请求访问本地服务。"}), 403
+            orig = urllib.parse.urlsplit(origin)
+            if (orig.hostname or "").lower() not in _LOOPBACK_HOSTS or (
+                req_host.port is not None and orig.port != req_host.port
+            ):
+                return jsonify({"error": "拒绝跨源请求访问本地服务。"}), 403
+        else:
+            referer = (request.headers.get("Referer") or "").strip()
+            if referer:
+                ref = urllib.parse.urlsplit(referer)
+                if (ref.hostname or "").lower() not in _LOOPBACK_HOSTS or (
+                    req_host.port is not None and ref.port != req_host.port
+                ):
+                    return jsonify({"error": "拒绝跨源来源访问本地服务。"}), 403
+
+        if request.method in {"POST", "DELETE"} and (origin or sec_site):
+            token = request.headers.get("X-KPW6-Token") or ""
+            if not secrets.compare_digest(token, APP_CSRF_TOKEN):
+                return jsonify({"error": "本地会话安全令牌无效或已过期，请刷新页面后重试。"}), 403
+
     if request.is_json and not isinstance(request.get_json(), dict):
         return jsonify({"error": "请求参数必须是 JSON 对象。"}), 400
 
@@ -2244,12 +2412,38 @@ def _get_highlights(fid: str, pdf_path: str):
 
 @app.route("/")
 def index():
-    return render_template_string(HTML_PAGE)
+    return Response(HTML_PAGE.replace("__KPW6_CSRF_TOKEN__", APP_CSRF_TOKEN), mimetype="text/html; charset=utf-8")
 
 
 @app.route("/api/files", methods=["GET"])
 def api_files():
     return jsonify({"uploaded": _get_uploaded_list()})
+
+
+@app.route("/api/delete_file", methods=["POST"])
+def api_delete_file():
+    _scan_uploads_dir()
+    data = request.json or {}
+    fid = str(data.get("file_id", "") or "").strip()
+    if fid not in FILES:
+        return jsonify({"error": "File not found"}), 404
+    info = FILES[fid]
+    if info.get("is_demo", False):
+        return jsonify({"error": "内置演示样张不可删除。"}), 400
+    up_real = os.path.realpath(UPLOAD_DIR)
+    target = os.path.realpath(info["path"])
+    try:
+        inside = os.path.commonpath([up_real, target]) == up_real
+    except ValueError:
+        inside = False
+    if inside and os.path.isfile(target):
+        try:
+            os.remove(target)
+        except OSError:
+            pass
+    FILES.pop(fid, None)
+    HIGHLIGHTS_CACHE.pop(fid, None)
+    return jsonify({"ok": True, "uploaded": _get_uploaded_list()})
 
 
 @app.route("/api/doc_info", methods=["GET"])
@@ -2336,7 +2530,7 @@ def api_preview():
     if fid not in FILES:
         return jsonify({"error": "File not found"}), 404
     opts = _parse_options(data)
-    pno = int(data.get("page_num", 0))
+    pno = _coerce_int(data["page_num"], 0, "page_num") if "page_num" in data else 0
     res = render_preview_comparison(FILES[fid]["path"], pno, opts)
     return jsonify(res)
 
@@ -2349,9 +2543,11 @@ def api_preview_hd():
     if fid not in FILES:
         return jsonify({"error": "File not found"}), 404
     opts = _parse_options(data)
-    pno = int(data.get("page_num", 0))
-    target_type = data.get("target_type", "kpw6")
-    screen_idx = int(data.get("screen_idx", 0))
+    pno = _coerce_int(data["page_num"], 0, "page_num") if "page_num" in data else 0
+    target_type = str(data.get("target_type", "kpw6"))
+    if target_type not in ("kpw6", "source"):
+        raise ValueError("不支持的预览目标类型。")
+    screen_idx = _coerce_int(data["screen_idx"], 0, "screen_idx") if "screen_idx" in data else 0
     res = render_hd_zoom_image(FILES[fid]["path"], pno, opts, target_type=target_type, screen_idx=screen_idx)
     return jsonify(res)
 
@@ -2379,6 +2575,8 @@ def api_export():
 
     try:
         stats = build_kpw6_pdf(src_info["path"], out_path, opts)
+    except ExportCancelledError:
+        return jsonify({"cancelled": True, "message": "已取消导出。"}), 200
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify({
@@ -2418,6 +2616,18 @@ def api_export_progress():
     if not info:
         return jsonify({"status": "starting", "percent": 1, "stage_text": "正在初始化排版引擎...", "elapsed_sec": 0.0, "eta_sec": None})
     return jsonify(info)
+
+
+@app.route("/api/cancel_export", methods=["POST"])
+def api_cancel_export():
+    data = request.json or {}
+    job_id = str(data.get("job_id", "") or "").strip()
+    cancelled = EXPORT_PDF_SERVICE.cancel_current()
+    if job_id and job_id in EXPORT_JOBS:
+        prev = dict(EXPORT_JOBS[job_id])
+        prev.update({"status": "cancelled", "stage_text": "⏹ 导出已取消", "eta_sec": 0.0})
+        _set_export_job(job_id, prev)
+    return jsonify({"ok": True, "cancelled": cancelled})
 
 
 def _scaled_progress_cb(progress_cb, lo: int, hi: int):
@@ -2590,7 +2800,7 @@ def api_export_unified():
     }.get(opts.mode, "KPW6")
 
     t0 = time.time()
-    EXPORT_JOBS[job_id] = {
+    _set_export_job(job_id, {
         "status": "running",
         "percent": 2,
         "current": 0,
@@ -2598,10 +2808,10 @@ def api_export_unified():
         "stage_text": "正在扫描页码范围与单页规则...",
         "elapsed_sec": 0.0,
         "eta_sec": None,
-    }
+    })
 
     try:
-        document_info = PDF_SERVICE.call("inspect_pdf", pdf_path, opts)
+        document_info = EXPORT_PDF_SERVICE.call("inspect_pdf", pdf_path, opts)
         total_doc_pages = document_info["total_pages"]
         detected_title = document_info["title"]
 
@@ -2644,7 +2854,7 @@ def api_export_unified():
                     overall_frac = min(0.99, max(0.02, overall_done / max(1, total_selected)))
                     eta = (elapsed / overall_frac) * (1.0 - overall_frac) if overall_frac > 0.04 else None
                     prefix = f"【第 {v_idx}/{num_vols} 卷】" if num_vols > 1 else ""
-                    EXPORT_JOBS[job_id] = {
+                    _set_export_job(job_id, {
                         "status": "running",
                         "percent": int(round(overall_frac * 100)),
                         "current": int(round(overall_done)),
@@ -2652,7 +2862,7 @@ def api_export_unified():
                         "stage_text": f"{prefix}{msg}",
                         "elapsed_sec": round(elapsed, 1),
                         "eta_sec": round(eta, 1) if eta is not None else None,
-                    }
+                    })
                 return _cb
 
             res_vol = _export_single_volume(
@@ -2668,7 +2878,7 @@ def api_export_unified():
             pages_completed_prior += len(page_chunk)
 
         elapsed_total = round(time.time() - t0, 1)
-        EXPORT_JOBS[job_id] = {
+        _set_export_job(job_id, {
             "status": "done",
             "percent": 100,
             "current": total_selected,
@@ -2676,7 +2886,7 @@ def api_export_unified():
             "stage_text": f"✅ 导出完成（共耗时 {elapsed_total}s）",
             "elapsed_sec": elapsed_total,
             "eta_sec": 0.0,
-        }
+        })
 
         if num_vols == 1:
             single_vol = dict(volumes_results[0])
@@ -2697,23 +2907,32 @@ def api_export_unified():
                 f"总计 {total_mb} MB，耗时 {elapsed_total}s）"
             ),
         })
+    except ExportCancelledError:
+        _set_export_job(job_id, {
+            "status": "cancelled",
+            "percent": 100,
+            "stage_text": "⏹ 导出已取消",
+            "elapsed_sec": round(time.time() - t0, 1),
+            "eta_sec": 0.0,
+        })
+        return jsonify({"cancelled": True, "message": "已取消导出。"}), 200
     except ValueError as ve:
-        EXPORT_JOBS[job_id] = {
+        _set_export_job(job_id, {
             "status": "error",
             "percent": 100,
             "stage_text": f"❌ 无法导出: {ve}",
             "elapsed_sec": round(time.time() - t0, 1),
             "eta_sec": 0.0,
-        }
+        })
         return jsonify({"error": str(ve)}), 400
     except Exception as e:
-        EXPORT_JOBS[job_id] = {
+        _set_export_job(job_id, {
             "status": "error",
             "percent": 100,
             "stage_text": f"❌ 导出失败: {e}",
             "elapsed_sec": round(time.time() - t0, 1),
             "eta_sec": 0.0,
-        }
+        })
         return jsonify({"error": str(e)}), 500
 
 
@@ -2777,7 +2996,10 @@ def _find_available_port(preferred: int = 8765) -> int:
             if chk.connect_ex(("127.0.0.1", candidate)) == 0:
                 continue
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
-            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                srv.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 srv.bind(("127.0.0.1", candidate))
                 return candidate
@@ -2803,6 +3025,7 @@ def _open_browser_when_ready(url: str, port: int):
 
 def _shutdown_owned_processes(*_):
     PDF_SERVICE.close()
+    EXPORT_PDF_SERVICE.close()
     cancel_all_conversions()
 
 
@@ -2821,7 +3044,7 @@ if __name__ == "__main__":
     parser.add_argument("--port-file", default=os.environ.get("KPW6_PORT_FILE", ""))
     args, _ = parser.parse_known_args()
 
-    bound_port = _find_available_port(args.port)
+    bound_port = 0 if args.port == 0 else _find_available_port(args.port)
     server = LoopbackWSGIServer("127.0.0.1", bound_port, app)
     bound_port = server.server_port
     url = f"http://127.0.0.1:{bound_port}"

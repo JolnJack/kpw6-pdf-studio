@@ -121,7 +121,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         proc.environment = env
         proc.terminationHandler = { [weak self] _ in
             DispatchQueue.main.async {
-                self?.rebuildMenu(status: "后台服务已停止")
+                guard let self = self, !self.isQuitting else { return }
+                self.rebuildMenu(status: "后台服务已停止")
             }
         }
 
@@ -137,8 +138,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self else { return }
             let deadline = Date().addingTimeInterval(25.0)
             while Date() < deadline {
+                if self.isQuitting { return }
                 if !proc.isRunning {
                     DispatchQueue.main.async {
+                        guard !self.isQuitting else { return }
                         self.showFatalAlert("精排引擎启动异常退出，请检查 ~/Documents/KPW6_PDF_Studio 写入权限。")
                     }
                     return
@@ -164,6 +167,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 Thread.sleep(forTimeInterval: 0.2)
             }
             DispatchQueue.main.async {
+                guard !self.isQuitting else { return }
                 self.showFatalAlert("本地服务响应超时（25秒），请退出后重试。")
             }
         }
@@ -205,7 +209,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func showFatalAlert(_ message: String) {
         let alert = NSAlert()
-        alert.messageText = "Kindle 精排大师"
+        alert.messageText = "KPW6 PDF Studio"
         alert.informativeText = message
         alert.alertStyle = .critical
         alert.addButton(withTitle: "退出")

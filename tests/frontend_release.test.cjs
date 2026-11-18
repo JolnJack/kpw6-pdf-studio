@@ -211,3 +211,49 @@ test('a current preview connection failure clears the image without an unhandled
   assert.equal(h.elements.get('sourcePreviewImg').src, '');
   assert.match(h.elements.get('previewErrorNotice').innerText, /连接中断/);
 });
+
+test('POST requests include X-KPW6-Token while GET requests omit request options', async () => {
+  const h = harness();
+  const preview = h.run('refreshPreview()');
+  assert.equal(h.pending[0].args.headers['X-KPW6-Token'], '__KPW6_CSRF_TOKEN__');
+  h.reply(0, h.preview(0, 'ok'));
+  await preview;
+
+  const init = h.run('fetchUploadedFilesAndInit()');
+  assert.equal(h.pending[1].args, undefined);
+  h.reply(1, {uploaded: []});
+  await new Promise(setImmediate);
+  if (h.pending[2]) h.reply(2, {highlights: []});
+  await new Promise(setImmediate);
+  if (h.pending[3]) h.reply(3, h.preview(0, 'demo'));
+  await init;
+});
+
+test('cancelling an active export hides the progress bar without an error alert', async () => {
+  const h = harness();
+  const exp = h.run('exportSelectedFormat("pdf")');
+  const exportIdx = h.pending.findIndex(p => p.url === '/api/export_unified');
+  assert.notEqual(exportIdx, -1);
+  const cancel = h.run('cancelActiveExport()');
+  const cancelIdx = h.pending.findIndex(p => p.url === '/api/cancel_export');
+  assert.notEqual(cancelIdx, -1);
+  h.reply(cancelIdx, {ok: true, cancelled: true});
+  await cancel;
+  h.reply(exportIdx, {cancelled: true});
+  await exp;
+  assert.equal(h.alerts.length, 0);
+  assert.equal(h.elements.get('exportProgressPanel').style.display, 'none');
+});
+
+test('deleting the active uploaded file switches cleanly to remaining history or demo', async () => {
+  const h = harness();
+  h.run('currentFileId = "book1"');
+  const del = h.run('deleteUploadedFile("book1")');
+  h.reply(0, {ok: true, uploaded: []});
+  await new Promise(setImmediate);
+  if (h.pending[1]) h.reply(1, {highlights: []});
+  await new Promise(setImmediate);
+  if (h.pending[2]) h.reply(2, h.preview(0, 'demo-fallback'));
+  await del;
+  assert.equal(h.run('currentFileId'), 'demo_academic_2col');
+});

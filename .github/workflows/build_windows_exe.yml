@@ -25,13 +25,16 @@ jobs:
       - name: Frontend regressions
         run: node --test tests/preview_race.test.cjs tests/frontend_release.test.cjs
       - name: Build and assemble distribution
-        run: python packaging/build_windows.py
+        run: python packaging/build_windows.py --zip-output dist/Windows.zip
+      - name: Verify pruned bundle and manifest
+        run: |
+          python -c "import json, os, pathlib; root = pathlib.Path('dist/Release'); internal = root / 'KindleKPW6Studio/_internal'; assert not (internal / 'pymupdf/layout').exists(); assert not (internal / 'pymupdf/mupdf-devel').exists(); m = json.loads((root / 'RELEASE_MANIFEST.json').read_text(encoding='utf-8')); assert m['base_commit'] == os.environ['GITHUB_SHA'], m; assert not m['working_tree_modified'], m"
       - name: Exercise frozen worker and exports
         run: python packaging/smoke_frozen.py dist/Release/KindleKPW6Studio/KindleKPW6Studio.exe --report build/frozen-smoke.json
       - uses: actions/upload-artifact@v4
         with:
           name: KindleKPW6Studio-Win64
-          path: dist/Release
+          path: dist/Windows.zip
       - uses: actions/upload-artifact@v4
         if: always()
         with:

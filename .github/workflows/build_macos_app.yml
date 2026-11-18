@@ -37,8 +37,10 @@ jobs:
         run: python -u -m unittest discover -s tests -v
       - name: Frontend regressions
         run: node --test tests/preview_race.test.cjs tests/frontend_release.test.cjs
-      - name: Build signed app archive
-        run: python packaging/build_macos.py
+      - name: Build signed app archive and DMG
+        run: |
+          python packaging/build_macos.py
+          python packaging/build_dmg.py --app-zip "dist/macos/KPW6-PDF-Studio-${EXPECTED_ARCH}.zip" --output "dist/macos/KPW6-PDF-Studio-${EXPECTED_ARCH}.dmg"
       - name: Verify extracted app and native libraries
         shell: bash
         run: |
@@ -48,6 +50,9 @@ jobs:
           import json, os, pathlib, platform, plistlib, subprocess
           app = pathlib.Path(os.environ['RUNNER_TEMP']) / 'kpw6-verify' / 'KPW6 PDF Studio.app'
           expected = os.environ['EXPECTED_ARCH']
+          internal = app / 'Contents/Resources/server/_internal'
+          assert not (internal / 'pymupdf/layout').exists(), 'Unused ONNX layout models must be pruned'
+          assert not (internal / 'pymupdf/mupdf-devel').exists(), 'Unused C++ headers must be pruned'
           binaries = {}
           magic = {b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf',
                    b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca',
@@ -78,7 +83,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: KPW6-PDF-Studio-macOS-${{ matrix.arch }}
-          path: dist/macos/*.zip
+          path: |
+            dist/macos/*.zip
+            dist/macos/*.dmg
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()

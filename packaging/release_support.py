@@ -19,10 +19,94 @@ from packaging.utils import canonicalize_name
 
 
 SOURCE_URL = "https://github.com/JolnJack/kpw6-pdf-studio"
-FROZEN_EXCLUDES = ("onnxruntime", "pymupdf4llm", "pymupdf_layout", "networkx", "yaml", "tkinter", "matplotlib", "scipy")
-EXCLUDED_DISTRIBUTIONS = {"onnxruntime", "pymupdf4llm", "pymupdf-layout", "networkx", "pyyaml", "matplotlib", "scipy"}
+FROZEN_EXCLUDES = (
+    "onnxruntime", "pymupdf4llm", "pymupdf_layout", "networkx", "yaml",
+    "tkinter", "matplotlib", "scipy", "psutil", "tabulate", "setuptools",
+    "pkg_resources", "charset_normalizer", "defusedxml", "tomli",
+    "colorama", "flatbuffers", "protobuf",
+)
+EXCLUDED_DISTRIBUTIONS = {
+    "onnxruntime", "pymupdf4llm", "pymupdf-layout", "networkx", "pyyaml",
+    "matplotlib", "scipy", "psutil", "tabulate", "setuptools",
+    "charset-normalizer", "defusedxml", "tomli", "colorama",
+    "flatbuffers", "protobuf",
+}
+PRUNED_INTERNAL_PREFIXES = (
+    "pymupdf/layout/",
+    "pymupdf/mupdf-devel/",
+    "pymupdf4llm/",
+    "pymupdf_layout/",
+    "onnxruntime/",
+)
+RELEASE_METADATA_ITEMS = (
+    "LICENSE", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_LICENSES",
+    "SOURCE.zip", "SOURCE_CODE.md", "RELEASE_MANIFEST.json",
+)
 EXCLUDED_PARTS = {".git", ".venv", "venv", "__pycache__", "node_modules", "uploads", "outputs", "samples", "work", "build", "dist", ".pytest_cache"}
 SOURCE_SUFFIXES = {".py", ".swift", ".spec", ".md", ".txt", ".cjs", ".js", ".json", ".yml", ".yaml", ".png", ".ico", ".icns"}
+
+
+def prune_pyinstaller_toc(entries):
+    """Filter unused ML models and C++ development headers out of PyInstaller TOC lists."""
+    kept = []
+    for item in entries:
+        dest = str(item[0]).replace("\\", "/").lstrip("./")
+        if any(dest == prefix.rstrip("/") or dest.startswith(prefix) for prefix in PRUNED_INTERNAL_PREFIXES):
+            continue
+        first_part = dest.split("/", 1)[0]
+        if first_part.endswith(".dist-info"):
+            dist_part = canonicalize_name(first_part[:-10].rsplit("-", 1)[0])
+            if dist_part in EXCLUDED_DISTRIBUTIONS:
+                continue
+        kept.append(item)
+    return kept
+
+
+def prune_frozen_backend(backend_dir: Path) -> None:
+    """Remove unused optional subtrees or excluded dist-info from an assembled PyInstaller directory."""
+    internal = Path(backend_dir) / "_internal"
+    if not internal.is_dir():
+        return
+    for prefix in PRUNED_INTERNAL_PREFIXES:
+        target = internal.joinpath(*prefix.strip("/").split("/"))
+        if target.is_dir():
+            shutil.rmtree(target)
+        elif target.is_file():
+            target.unlink()
+    for entry in list(internal.iterdir()):
+        if entry.name.endswith(".dist-info"):
+            pkg_raw = entry.name[:-10].rsplit("-", 1)[0]
+            if canonicalize_name(pkg_raw) in EXCLUDED_DISTRIBUTIONS:
+                shutil.rmtree(entry)
+
+
+def bundled_distributions(source_root: Path, backend_dir: Path | None = None) -> list[metadata.Distribution]:
+    """Combine declared runtime requirements with any distribution physically present in _internal."""
+    found = {canonicalize_name(dist.metadata["Name"]): dist for dist in runtime_distributions(source_root)}
+    if backend_dir is None:
+        return [found[name] for name in sorted(found)]
+    internal = Path(backend_dir) / "_internal"
+    if not internal.is_dir():
+        return [found[name] for name in sorted(found)]
+    pkg_to_dists = metadata.packages_distributions()
+    extra_names = set()
+    for entry in internal.iterdir():
+        if entry.name.endswith(".dist-info"):
+            pkg_raw = entry.name[:-10].rsplit("-", 1)[0]
+            extra_names.add(pkg_raw)
+            continue
+        mod_name = entry.name.split(".", 1)[0]
+        for dist_name in pkg_to_dists.get(mod_name, ()):
+            extra_names.add(dist_name)
+    for dist_name in extra_names:
+        canon = canonicalize_name(dist_name)
+        if canon in EXCLUDED_DISTRIBUTIONS or canon in found:
+            continue
+        try:
+            found[canon] = metadata.distribution(dist_name)
+        except metadata.PackageNotFoundError:
+            continue
+    return [found[name] for name in sorted(found)]
 
 
 def runtime_distributions(source_root: Path) -> list[metadata.Distribution]:
@@ -91,7 +175,7 @@ def source_files(source_root: Path) -> list[Path]:
         if relative.name in {".env", "id_rsa", "id_ed25519"} or relative.suffix.lower() in {".pem", ".key", ".p12", ".pfx"}:
             continue
         allowed_root = len(relative.parts) == 1 and (relative.suffix in {".py", ".spec"} or relative.name in {"LICENSE", "README.md", "THIRD_PARTY_NOTICES.md", ".gitignore", ".gitattributes"} or re.fullmatch(r"requirements(?:-[\w-]+)?\.txt", relative.name))
-        allowed_directory = relative.parts[0] in {"packaging", "tests", ".github"} and relative.suffix.lower() in SOURCE_SUFFIXES
+        allowed_directory = relative.parts[0] in {"packaging", "tests", ".github", "docs"} and relative.suffix.lower() in SOURCE_SUFFIXES
         file = source_root / relative
         if (allowed_root or allowed_directory) and file.is_file() and not file.is_symlink():
             files.append(relative)
@@ -107,7 +191,7 @@ def _python_license() -> Path:
     raise FileNotFoundError("Python LICENSE.txt was not found; set KPW6_PYTHON_LICENSE to the interpreter's license file")
 
 
-def write_release_metadata(source_root: Path, destination: Path, distributions=None) -> dict:
+def write_release_metadata(source_root: Path, destination: Path, distributions=None, backend_dir: Path | None = None) -> dict:
     """Attach AGPL terms, exact source snapshot, provenance, and wheel notices."""
     source_root, destination = Path(source_root).resolve(), Path(destination).resolve()
     for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
@@ -116,7 +200,7 @@ def write_release_metadata(source_root: Path, destination: Path, distributions=N
     destination.mkdir(parents=True, exist_ok=True)
     for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
         shutil.copyfile(source_root / name, destination / name)
-    distributions = runtime_distributions(source_root) if distributions is None else list(distributions)
+    distributions = bundled_distributions(source_root, backend_dir) if distributions is None else list(distributions)
     legal_root = destination / "THIRD_PARTY_LICENSES"
     if legal_root.exists():
         shutil.rmtree(legal_root)

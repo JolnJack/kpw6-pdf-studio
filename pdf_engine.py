@@ -1,4 +1,6 @@
 import base64
+from collections import OrderedDict
+import hashlib
 import html
 import io
 import math
@@ -14,6 +16,34 @@ from typing import List, Tuple, Optional, Dict, Any, Callable
 import pymupdf as fitz  # PyMuPDF
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
+
+_XML_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffe\uffff]")
+_EINK_16_PALETTE = [v for i in range(16) for v in (i * 17, i * 17, i * 17)]
+_MAX_CACHED_PDF_BYTES = 80 * 1024 * 1024
+_SOURCE_PDF_CACHE: "OrderedDict[Tuple[str, int, bytes], bytes]" = OrderedDict()
+_MARGIN_EXCLUSIONS_CACHE: "OrderedDict[Tuple[str, int, bytes], Dict[int, set]]" = OrderedDict()
+_HIGHLIGHTS_DOC_CACHE: "OrderedDict[Tuple[str, int, bytes], List[Dict[str, Any]]]" = OrderedDict()
+
+
+def _xml_clean(text: str) -> str:
+    if not text:
+        return ""
+    return _XML_ILLEGAL_CHARS_RE.sub("", str(text))
+
+
+def _xml_escape(text: str) -> str:
+    return html.escape(_xml_clean(text))
+
+
+def _encode_eink_png_bytes(gray_samples: bytes, width: int, height: int) -> bytes:
+    """Encode an 8-bit grayscale buffer as a compact 4-bit (16-level) grayscale PNG matching Carta 1300."""
+    arr = np.frombuffer(gray_samples, dtype=np.uint8).reshape((height, width))
+    q_idx = ((arr.astype(np.uint16) * 15 + 127) // 255).astype(np.uint8)
+    im = Image.fromarray(q_idx, mode="P")
+    im.putpalette(_EINK_16_PALETTE)
+    buf = io.BytesIO()
+    im.save(buf, format="PNG", bits=4, compress_level=6)
+    return buf.getvalue()
 
 # KPW6 Signature Edition (12th Gen, 7-inch Carta 1300)
 # Physical resolution: 1264 x 1680 px (300 PPI) -> aspect ratio 1 : 1.32911
@@ -102,32 +132,68 @@ def get_target_page_list(total_pages: int, options: ProcessOptions) -> List[int]
     return [p for p in base_pages if overrides.get(str(p)) != "skip"]
 
 
+def _bake_and_normalize_doc(doc: fitz.Document) -> None:
+    # Flatten visible appearances into this in-memory document before any
+    # clipping/rotation. show_pdf_page() does not copy annotations or fields.
+    # bake() retains their vector appearances; the input file is never saved.
+    doc.bake(annots=True, widgets=True)
+    for page in doc:
+        if page.rotation:
+            # remove_rotation() works on MediaBox coordinates. Temporarily
+            # expose that full box, then restore the transformed visible crop.
+            # Otherwise a 90/270 degree turn resets CropBox and reveals margins.
+            media = page.mediabox
+            crop = page.cropbox
+            page.set_cropbox(fitz.Rect(media.x0, 0, media.x1, media.height))
+            visible = fitz.Rect(crop.x0 - media.x0, crop.y0,
+                                crop.x1 - media.x0, crop.y1) * page.rotation_matrix
+            page.remove_rotation()
+            origin = page.cropbox_position
+            page.set_cropbox(fitz.Rect(visible.x0 + origin.x, visible.y0 + origin.y,
+                                      visible.x1 + origin.x, visible.y1 + origin.y))
+
+
 def _open_source_pdf(pdf_path: str) -> fitz.Document:
     """Normalize rotation in memory so rendering, text and vector clips share coordinates.
 
     The source file is never saved or modified. Keep the visual rotation in the
     content stream instead of /Rotate, as required for clipped show_pdf_page().
+    Caches the normalized byte stream for repeated single-page previews.
     """
-    doc = fitz.open(pdf_path)
+    abs_path = os.path.abspath(pdf_path)
     try:
-        # Flatten visible appearances into this in-memory document before any
-        # clipping/rotation. show_pdf_page() does not copy annotations or fields.
-        # bake() retains their vector appearances; the input file is never saved.
-        doc.bake(annots=True, widgets=True)
-        for page in doc:
-            if page.rotation:
-                # remove_rotation() works on MediaBox coordinates. Temporarily
-                # expose that full box, then restore the transformed visible crop.
-                # Otherwise a 90/270 degree turn resets CropBox and reveals margins.
-                media = page.mediabox
-                crop = page.cropbox
-                page.set_cropbox(fitz.Rect(media.x0, 0, media.x1, media.height))
-                visible = fitz.Rect(crop.x0 - media.x0, crop.y0,
-                                    crop.x1 - media.x0, crop.y1) * page.rotation_matrix
-                page.remove_rotation()
-                origin = page.cropbox_position
-                page.set_cropbox(fitz.Rect(visible.x0 + origin.x, visible.y0 + origin.y,
-                                          visible.x1 + origin.x, visible.y1 + origin.y))
+        file_size = os.path.getsize(abs_path)
+    except OSError:
+        file_size = -1
+
+    if 0 < file_size <= _MAX_CACHED_PDF_BYTES:
+        with open(abs_path, "rb") as stream:
+            raw_bytes = stream.read()
+        cache_key = (abs_path, len(raw_bytes), hashlib.blake2b(raw_bytes, digest_size=16).digest())
+        cached_bytes = _SOURCE_PDF_CACHE.get(cache_key)
+        if cached_bytes is not None:
+            _SOURCE_PDF_CACHE.move_to_end(cache_key)
+            doc = fitz.open(stream=cached_bytes, filetype="pdf")
+            doc._kpw6_cache_key = cache_key
+            return doc
+
+        doc = fitz.open(stream=raw_bytes, filetype="pdf")
+        try:
+            _bake_and_normalize_doc(doc)
+            normalized = doc.tobytes(garbage=0, deflate=False)
+            if len(normalized) <= _MAX_CACHED_PDF_BYTES:
+                _SOURCE_PDF_CACHE[cache_key] = normalized
+                while len(_SOURCE_PDF_CACHE) > 2 or sum(len(v) for v in _SOURCE_PDF_CACHE.values()) > 128 * 1024 * 1024:
+                    _SOURCE_PDF_CACHE.popitem(last=False)
+            doc._kpw6_cache_key = cache_key
+        except Exception:
+            doc.close()
+            raise
+        return doc
+
+    doc = fitz.open(abs_path)
+    try:
+        _bake_and_normalize_doc(doc)
     except Exception:
         doc.close()
         raise
@@ -1103,11 +1169,17 @@ def _running_margin_exclusions(doc: fitz.Document) -> Dict[int, set]:
 
     Margin position alone is not evidence: continuous body lines in these bands
     are retained. Non-numeric running text must repeat on at least two pages.
-    Cache once per in-memory source document, not once per page extraction.
+    Cache once per source document, not once per page extraction.
     """
     cached = getattr(doc, "_kpw6_margin_exclusions", None)
     if cached is not None:
         return cached
+    cache_key = getattr(doc, "_kpw6_cache_key", None)
+    if cache_key is not None and cache_key in _MARGIN_EXCLUSIONS_CACHE:
+        _MARGIN_EXCLUSIONS_CACHE.move_to_end(cache_key)
+        excluded = _MARGIN_EXCLUSIONS_CACHE[cache_key]
+        doc._kpw6_margin_exclusions = excluded
+        return excluded
     candidates = []
     occurrences: Dict[Tuple[str, str], set] = {}
     for pno, page in enumerate(doc):
@@ -1116,7 +1188,7 @@ def _running_margin_exclusions(doc: fitz.Document) -> Dict[int, set]:
             if block.get("type") != 0:
                 continue
             for line in block.get("lines", []):
-                txt = " ".join("".join(s.get("text", "") for s in line.get("spans", [])).split())
+                txt = " ".join(_xml_clean("".join(s.get("text", "") for s in line.get("spans", []))).split())
                 if txt:
                     size = max((s.get("size", 11) for s in line.get("spans", [])), default=11)
                     lines.append((txt, fitz.Rect(line["bbox"]), size))
@@ -1137,6 +1209,10 @@ def _running_margin_exclusions(doc: fitz.Document) -> Dict[int, set]:
         if PAGE_NUM_REGEX.fullmatch(key[1]) or len(occurrences[key]) >= 2:
             excluded.setdefault(pno, set()).add(key)
     doc._kpw6_margin_exclusions = excluded
+    if cache_key is not None:
+        _MARGIN_EXCLUSIONS_CACHE[cache_key] = excluded
+        while len(_MARGIN_EXCLUSIONS_CACHE) > 8:
+            _MARGIN_EXCLUSIONS_CACHE.popitem(last=False)
     return excluded
 
 
@@ -1175,7 +1251,7 @@ def extract_structured_text_from_page(page: fitz.Page, pno: int, trim_hf: bool =
         for line in b.get("lines", []):
             lbbox = fitz.Rect(line["bbox"])
             spans = line.get("spans", [])
-            line_text = "".join(s.get("text", "") for s in spans).strip()
+            line_text = _xml_clean("".join(s.get("text", "") for s in spans)).strip()
             if not line_text:
                 continue
             max_sz = max((float(s.get("size", 11.0)) for s in spans), default=11.0)
@@ -1323,7 +1399,7 @@ def extract_book_meta(
         except Exception:
             pass
 
-    final_title = options.custom_cover_title.strip() or detected_title or clean_fname
+    final_title = _xml_clean(options.custom_cover_title.strip() or detected_title or clean_fname).strip() or clean_fname
     mode_badge = {
         "academic_2col": "双栏学术论文 · KPW6 专享重排",
         "tech_book": "专业图表书籍 · KPW6 专享重排",
@@ -1331,7 +1407,7 @@ def extract_book_meta(
         "comic_manga": "KPW6 满屏高清漫画/画集",
         "pure_text": "KPW6 原生精排电子书",
     }.get(options.mode, "KPW6 Signature Edition 专享版")
-    final_author = options.custom_cover_author.strip() or detected_author or mode_badge
+    final_author = _xml_clean(options.custom_cover_author.strip() or detected_author or mode_badge).strip() or mode_badge
     return final_title, final_author
 
 
@@ -1607,8 +1683,8 @@ div.screen-box img {
         if has_cover:
             zf.writestr("OEBPS/images/cover.jpg", cover_bytes)
 
-        safe_book_title = html.escape(book_title)
-        safe_book_author = html.escape(book_author)
+        safe_book_title = _xml_escape(book_title)
+        safe_book_author = _xml_escape(book_author)
         cover_xhtml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="zh-CN">
@@ -1626,6 +1702,7 @@ div.screen-box img {
         if has_cover:
             zf.writestr("OEBPS/cover.xhtml", cover_xhtml)
 
+        first_bodymatter_href = ""
         use_reflow = (options.mode == "pure_text") if force_reflow is None else force_reflow
         if use_reflow:
             all_items: List[ExtractedParagraph] = []
@@ -1645,7 +1722,8 @@ div.screen-box img {
                             pix = page.get_pixmap(matrix=fitz.Matrix(
                                 KPW6_PX_W / KPW6_PT_W, KPW6_PX_H / KPW6_PT_H),
                                 colorspace=fitz.csGRAY, alpha=False)
-                            zf.writestr(f"OEBPS/{image_rel}", pix.tobytes("png"), compress_type=zipfile.ZIP_STORED)
+                            png_bytes = _encode_eink_png_bytes(pix.samples, pix.width, pix.height)
+                            zf.writestr(f"OEBPS/{image_rel}", png_bytes, compress_type=zipfile.ZIP_STORED)
                             manifest_items.append(f'<item id="protected_{screens_count:04d}" href="{image_rel}" media-type="image/png"/>')
                             all_items.append(ExtractedParagraph(kind="page_image", text=image_rel, src_page=pno))
                     continue
@@ -1682,9 +1760,11 @@ div.screen-box img {
 
             for idx, ch in enumerate(chapters, start=1):
                 fname = f"chapter_{idx:03d}.xhtml"
+                if not first_bodymatter_href:
+                    first_bodymatter_href = fname
                 cid = f"chap_{idx:03d}"
-                safe_title = html.escape(ch["title"])
-                paras_html = "\n".join(f"  <p>{html.escape(p)}</p>" for p in ch["paras"])
+                safe_title = _xml_escape(ch["title"])
+                paras_html = "\n".join(f"  <p>{_xml_escape(p)}</p>" for p in ch["paras"])
                 if ch.get("image"):
                     body_class = ' class="full-screen-page"'
                     body_html = f'<div class="screen-box"><img src="{ch["image"]}" alt="{safe_title}"/></div>'
@@ -1727,20 +1807,21 @@ div.screen-box img {
                 slices, _, _, _ = analyze_page_slices(page, pno, options, dpi=150)
                 tmp_doc = fitz.open()
                 _render_slices_to_doc(src_doc, pno, slices, tmp_doc, options)
-                page_to_first_screen[pno] = screen_idx + 1
+                if len(tmp_doc) > 0:
+                    page_to_first_screen[pno] = screen_idx + 1
 
                 for sub_i, kp in enumerate(tmp_doc):
                     screen_idx += 1
                     pix = kp.get_pixmap(matrix=fitz.Matrix(scale_x, scale_y), colorspace=fitz.csGRAY, alpha=False)
-                    im = Image.frombytes("L", (pix.width, pix.height), pix.samples)
-                    img_buf = io.BytesIO()
-                    im.save(img_buf, format="PNG", compress_level=6)
+                    png_bytes = _encode_eink_png_bytes(pix.samples, pix.width, pix.height)
 
                     img_rel = f"images/screen_{screen_idx:04d}.png"
                     xhtml_rel = f"screen_{screen_idx:04d}.xhtml"
-                    zf.writestr(f"OEBPS/{img_rel}", img_buf.getvalue(), compress_type=zipfile.ZIP_STORED)
+                    if not first_bodymatter_href:
+                        first_bodymatter_href = xhtml_rel
+                    zf.writestr(f"OEBPS/{img_rel}", png_bytes, compress_type=zipfile.ZIP_STORED)
 
-                    page_label = f"原书第 {pno+1} 页 · 第 {sub_i+1} 屏"
+                    page_label = _xml_escape(f"原书第 {pno+1} 页 · 第 {sub_i+1} 屏")
                     s_xhtml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="zh-CN">
@@ -1768,8 +1849,9 @@ div.screen-box img {
                 raw_toc = src_doc.get_toc()
                 for _, t_title, src_p1 in raw_toc:
                     p0 = src_p1 - 1
-                    if p0 in page_to_first_screen and t_title.strip():
-                        toc_entries.append((t_title.strip(), page_to_first_screen[p0]))
+                    cleaned_t = _xml_clean(t_title).strip()
+                    if p0 in page_to_first_screen and cleaned_t:
+                        toc_entries.append((cleaned_t, page_to_first_screen[p0]))
             except Exception:
                 pass
 
@@ -1780,7 +1862,7 @@ div.screen-box img {
                 p0 = hl.get("page_num", 0)
                 if p0 in page_to_first_screen:
                     prefix = "📊 " if hl.get("kind") == "table" else "📈 "
-                    toc_entries.append((prefix + hl.get("label", f"P{p0+1}"), page_to_first_screen[p0]))
+                    toc_entries.append((prefix + _xml_clean(hl.get("label", f"P{p0+1}")), page_to_first_screen[p0]))
 
             if not toc_entries and page_to_first_screen:
                 step = 1 if limit_pages <= 15 else (5 if limit_pages <= 80 else 10)
@@ -1791,7 +1873,7 @@ div.screen-box img {
 
             chapters_count = len(toc_entries)
             for idx, (entry_title, target_scr) in enumerate(toc_entries, start=1):
-                safe_t = html.escape(entry_title)
+                safe_t = _xml_escape(entry_title)
                 href = f"screen_{target_scr:04d}.xhtml"
                 nav_lis.append(f'      <li><a href="{href}">{safe_t}</a></li>')
                 ncx_navpoints.append(
@@ -1801,7 +1883,17 @@ div.screen-box img {
     </navPoint>"""
                 )
 
-        # 4. OEBPS/nav.xhtml
+        # 4. OEBPS/nav.xhtml (with EPUB 3 landmarks)
+        landmark_lis = []
+        if has_cover:
+            landmark_lis.append('      <li><a epub:type="cover" href="cover.xhtml">书籍封面</a></li>')
+        if first_bodymatter_href:
+            landmark_lis.append(f'      <li><a epub:type="bodymatter" href="{first_bodymatter_href}">正文开始</a></li>')
+        landmarks_block = (
+            "\n  <nav epub:type=\"landmarks\" hidden=\"\">\n    <h2>导航地标</h2>\n    <ol>\n"
+            + "\n".join(landmark_lis)
+            + "\n    </ol>\n  </nav>"
+        ) if landmark_lis else ""
         nav_xhtml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="zh-CN">
@@ -1812,7 +1904,7 @@ div.screen-box img {
     <ol>
 {chr(10).join(nav_lis)}
     </ol>
-  </nav>
+  </nav>{landmarks_block}
 </body>
 </html>"""
         zf.writestr("OEBPS/nav.xhtml", nav_xhtml)
@@ -1831,13 +1923,13 @@ div.screen-box img {
 </ncx>"""
         zf.writestr("OEBPS/toc.ncx", ncx_xml)
 
-        # 6. OEBPS/content.opf (Includes both EPUB 2 <meta name="cover"> and EPUB 3 properties="cover-image" + <guide>)
+        # 6. OEBPS/content.opf (EPUB 3 properties="cover-image" + legacy reader <meta name="cover">)
         modified = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         cover_meta = '<meta name="cover" content="cover-image"/>' if has_cover else ''
         cover_guide = '<guide><reference type="cover" title="书籍封面" href="cover.xhtml"/></guide>' if has_cover else ''
         opf_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="3.0">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="BookId">urn:uuid:{book_uuid}</dc:identifier>
     <dc:title>{safe_book_title}</dc:title>
     <dc:language>zh-CN</dc:language>
@@ -1910,16 +2002,14 @@ def build_kpw6_cbz(
             for kp in tmp_doc:
                 screen_idx += 1
                 pix = kp.get_pixmap(matrix=fitz.Matrix(scale_x, scale_y), colorspace=fitz.csGRAY, alpha=False)
-                im = Image.frombytes("L", (pix.width, pix.height), pix.samples)
-                img_buf = io.BytesIO()
-                im.save(img_buf, format="PNG", compress_level=6)
-                zf.writestr(f"{screen_idx:04d}.png", img_buf.getvalue(), compress_type=zipfile.ZIP_STORED)
+                png_bytes = _encode_eink_png_bytes(pix.samples, pix.width, pix.height)
+                zf.writestr(f"{screen_idx:04d}.png", png_bytes, compress_type=zipfile.ZIP_STORED)
             tmp_doc.close()
 
         comic_info = f"""<?xml version="1.0" encoding="utf-8"?>
 <ComicInfo xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <Title>{html.escape(book_title)}</Title>
-  <Writer>{html.escape(book_author)}</Writer>
+  <Title>{_xml_escape(book_title)}</Title>
+  <Writer>{_xml_escape(book_author)}</Writer>
   <PageCount>{screen_idx + int(has_cover)}</PageCount>
   <Manga>{"YesAndRightToLeft" if (options.mode == "comic_manga" and options.manga_rtl) else "No"}</Manga>
 </ComicInfo>"""
@@ -1978,10 +2068,12 @@ def _render_pure_text_items_to_kpw6_doc(
     items: List[ExtractedParagraph],
     out_doc: fitz.Document,
     options: ProcessOptions,
-) -> None:
+    page_map: Optional[Dict[int, int]] = None,
+) -> List[List[Any]]:
     """
     Typeset extracted pure-text paragraphs & chapter headings directly onto KPW6 vector pages
     with CJK indentation (2em), user-chosen font size, and clean line spacing.
+    Returns detected PDF TOC entries ([level, title, 1-based_out_page]).
     """
     font = fitz.Font("cjk")
     margin_pt = max(12.0, KPW6_PT_W * (options.margin_Percent / 100.0))
@@ -1996,6 +2088,7 @@ def _render_pure_text_items_to_kpw6_doc(
     curr_page: Optional[fitz.Page] = None
     curr_y = y_top
     tw: Optional[fitz.TextWriter] = None
+    chapter_toc: List[List[Any]] = []
 
     def start_new_page():
         nonlocal curr_page, curr_y, tw
@@ -2016,9 +2109,18 @@ def _render_pure_text_items_to_kpw6_doc(
 
             # Wrap chapter title lines
             ch_lines = _wrap_cjk_line(font, item.text, chap_size, avail_w, indent_pt=0.0)
+            recorded_chap = False
             for cl, x_indent in ch_lines:
                 if curr_y + chap_size * 1.4 > y_bot:
                     start_new_page()
+                if not recorded_chap:
+                    recorded_chap = True
+                    out_page_1 = len(out_doc)
+                    clean_ch = _xml_clean(item.text).strip()
+                    if clean_ch:
+                        chapter_toc.append([1, clean_ch, out_page_1])
+                    if page_map is not None and item.src_page not in page_map:
+                        page_map[item.src_page] = out_page_1 - 1
                 tw.append((margin_pt + x_indent, curr_y + chap_size), cl, font=font, fontsize=chap_size)
                 curr_y += chap_size * 1.45
             curr_y += line_h * 0.35
@@ -2029,12 +2131,19 @@ def _render_pure_text_items_to_kpw6_doc(
             for pl, x_indent in p_lines:
                 if curr_y + line_h > y_bot:
                     start_new_page()
+                if page_map is not None and item.src_page not in page_map:
+                    page_map[item.src_page] = len(out_doc) - 1
                 tw.append((margin_pt + x_indent, curr_y + fsize), pl, font=font, fontsize=fsize)
                 curr_y += line_h
             curr_y += fsize * 0.38  # Paragraph spacing
 
     if curr_page is not None and tw is not None:
         tw.write_text(curr_page)
+    return chapter_toc
+
+
+def _is_latin_word_char(ch: str) -> bool:
+    return ch.isascii() and (ch.isalnum() or ch in "_'/")
 
 
 def _wrap_cjk_line(
@@ -2044,7 +2153,7 @@ def _wrap_cjk_line(
     max_width: float,
     indent_pt: float = 0.0,
 ) -> List[Tuple[str, float]]:
-    """Greedy line wrapper supporting mixed CJK and Latin text with hanging punctuation protection."""
+    """Greedy line wrapper supporting mixed CJK and word-boundary Latin text with hanging punctuation protection."""
     lines: List[Tuple[str, float]] = []
     curr_str = ""
     curr_indent = indent_pt
@@ -2062,11 +2171,31 @@ def _wrap_cjk_line(
                 curr_indent = 0.0
                 curr_limit = max_width
                 continue
+            if ch == " ":
+                lines.append((curr_str, curr_indent))
+                curr_str = ""
+                curr_indent = 0.0
+                curr_limit = max_width
+                continue
+            # Prefer wrapping at whitespace/hyphen/CJK boundary instead of bisecting an English word
+            if _is_latin_word_char(ch) and _is_latin_word_char(curr_str[-1]):
+                split_pos = len(curr_str) - 1
+                while split_pos > 0 and _is_latin_word_char(curr_str[split_pos - 1]):
+                    split_pos -= 1
+                prefix = curr_str[:split_pos].rstrip(" ")
+                if prefix and font.text_length(prefix, fontsize=fontsize) >= curr_limit * 0.28:
+                    lines.append((prefix, curr_indent))
+                    curr_str = curr_str[split_pos:] + ch
+                    curr_indent = 0.0
+                    curr_limit = max_width
+                    continue
             lines.append((curr_str, curr_indent))
-            curr_str = ch
+            curr_str = ch.lstrip(" ")
             curr_indent = 0.0
             curr_limit = max_width
         else:
+            if not curr_str and ch == " " and lines:
+                continue
             curr_str = candidate
 
     if curr_str:
@@ -2530,6 +2659,7 @@ def build_kpw6_pdf(
         _insert_cover_page_to_doc(src_doc, input_pdf_path, out_doc, options)
 
     page_map: Dict[int, int] = {}
+    detected_pure_text_toc: List[List[Any]] = []
 
     if options.mode == "pure_text":
         all_items: List[ExtractedParagraph] = []
@@ -2537,7 +2667,9 @@ def build_kpw6_pdf(
         for step_i, pno in enumerate(target_pages, start=1):
             if overrides.get(str(pno), "auto") in ("whole_portrait", "whole_landscape"):
                 if all_items:
-                    _render_pure_text_items_to_kpw6_doc(all_items, out_doc, options)
+                    detected_pure_text_toc.extend(
+                        _render_pure_text_items_to_kpw6_doc(all_items, out_doc, options, page_map=page_map)
+                    )
                     all_items = []
                 if progress_cb:
                     progress_cb(step_i, limit_pages, f"正在按原版整页模式精排第 {pno+1} 页 ({step_i}/{limit_pages})...")
@@ -2556,7 +2688,9 @@ def build_kpw6_pdf(
                     p_items = p_items[1:]
             all_items.extend(p_items)
         if all_items:
-            _render_pure_text_items_to_kpw6_doc(all_items, out_doc, options)
+            detected_pure_text_toc.extend(
+                _render_pure_text_items_to_kpw6_doc(all_items, out_doc, options, page_map=page_map)
+            )
     else:
         for step_i, pno in enumerate(target_pages, start=1):
             if progress_cb:
@@ -2566,22 +2700,28 @@ def build_kpw6_pdf(
             first_idx = _render_slices_to_doc(src_doc, pno, slices, out_doc, options)
             page_map[pno] = first_idx
 
-        try:
-            new_toc = [[1, "📖 书籍封面", 1]] if has_cover else []
-            toc = src_doc.get_toc()
-            if toc and page_map:
-                surviving_levels = []
-                for lvl, title, src_p1 in toc:
-                    src_p0 = max(0, src_p1 - 1)
-                    if src_p0 in page_map:
-                        while surviving_levels and surviving_levels[-1] >= lvl:
-                            surviving_levels.pop()
-                        surviving_levels.append(lvl)
-                        new_toc.append([len(surviving_levels), title, page_map[src_p0] + 1])
-            if new_toc:
-                out_doc.set_toc(new_toc)
-        except Exception:
-            pass
+    try:
+        new_toc = [[1, "📖 书籍封面", 1]] if has_cover else []
+        toc = src_doc.get_toc()
+        mapped_src_toc = []
+        if toc and page_map:
+            surviving_levels = []
+            for lvl, title, src_p1 in toc:
+                src_p0 = max(0, src_p1 - 1)
+                clean_title = _xml_clean(title).strip()
+                if src_p0 in page_map and clean_title:
+                    while surviving_levels and surviving_levels[-1] >= lvl:
+                        surviving_levels.pop()
+                    surviving_levels.append(lvl)
+                    mapped_src_toc.append([len(surviving_levels), clean_title, page_map[src_p0] + 1])
+        if mapped_src_toc:
+            new_toc.extend(mapped_src_toc)
+        elif detected_pure_text_toc:
+            new_toc.extend(detected_pure_text_toc)
+        if new_toc:
+            out_doc.set_toc(new_toc)
+    except Exception:
+        pass
 
     try:
         out_doc.set_metadata({
@@ -2595,6 +2735,10 @@ def build_kpw6_pdf(
     except Exception:
         pass
 
+    try:
+        out_doc.subset_fonts()
+    except Exception:
+        pass
     out_doc.save(output_pdf_path, garbage=3, deflate=True)
     out_pages_count = len(out_doc)
     out_doc.close()
@@ -2694,6 +2838,13 @@ def scan_document_highlights(input_pdf_path: str) -> List[Dict[str, Any]]:
     highlights: List[Dict[str, Any]] = []
     try:
         doc = _open_source_pdf(input_pdf_path)
+        cache_key = getattr(doc, "_kpw6_cache_key", None)
+        if cache_key is not None and cache_key in _HIGHLIGHTS_DOC_CACHE:
+            _HIGHLIGHTS_DOC_CACHE.move_to_end(cache_key)
+            cached_hl = [dict(item) for item in _HIGHLIGHTS_DOC_CACHE[cache_key]]
+            doc.close()
+            return cached_hl
+
         total = len(doc)
         scan_limit = total
         table_cap_re = re.compile(
@@ -2735,10 +2886,29 @@ def scan_document_highlights(input_pdf_path: str) -> List[Dict[str, Any]]:
                     "raw_tag": f_str,
                     "label": f"P{pno+1} {f_str}",
                 })
+        if cache_key is not None:
+            _HIGHLIGHTS_DOC_CACHE[cache_key] = [dict(item) for item in highlights]
+            while len(_HIGHLIGHTS_DOC_CACHE) > 8:
+                _HIGHLIGHTS_DOC_CACHE.popitem(last=False)
         doc.close()
     except Exception:
         pass
     return highlights
+
+
+def _has_preview_cover(total_pages: int, pno: int, options: ProcessOptions) -> bool:
+    """Show the generated cover on the first non-skipped page of the active export range."""
+    if options.cover_mode == "none" or total_pages <= 0:
+        return False
+    page_override = (options.page_overrides or {}).get(str(pno), "auto")
+    if page_override == "skip":
+        return False
+    try:
+        target_pages = get_target_page_list(total_pages, options)
+    except ValueError:
+        target_pages = []
+    anchor_page = target_pages[0] if target_pages else max(0, min(total_pages - 1, (options.start_page or 1) - 1))
+    return pno == anchor_page
 
 
 def render_preview_comparison(
@@ -2776,7 +2946,7 @@ def render_preview_comparison(
 
     book_title, book_author = extract_book_meta(src_doc, input_pdf_path, options)
     page_override = (options.page_overrides or {}).get(str(pno), "auto")
-    has_cover_on_this_page = (pno == 0 and options.cover_mode != "none")
+    has_cover_on_this_page = _has_preview_cover(total_pages, pno, options)
     cover_offset = 1 if has_cover_on_this_page else 0
 
     if page_override == "skip":
@@ -2889,7 +3059,7 @@ def render_hd_zoom_image(
 
     slices, _, _, _ = analyze_page_slices(page, pno, options, dpi=150)
     temp_out = fitz.open()
-    if pno == 0 and options.cover_mode != "none":
+    if _has_preview_cover(total_pages, pno, options):
         _insert_cover_page_to_doc(src_doc, input_pdf_path, temp_out, options)
     _render_slices_to_doc(src_doc, pno, slices, temp_out, options)
     if len(temp_out) == 0:

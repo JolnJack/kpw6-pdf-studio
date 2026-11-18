@@ -8,15 +8,15 @@
 
 | 你的电脑 | 下载 | 安装与启动 |
 | --- | --- | --- |
-| Windows（Intel / AMD，64 位） | [Windows 版](https://github.com/JolnJack/kpw6-pdf-studio/releases/download/v1.0.0-rc.1/Windows.zip) | 完整解压，双击 `双击启动_Kindle精排大师.bat`，保留全部文件 |
-| Intel Mac | [Intel Mac 版](https://github.com/JolnJack/kpw6-pdf-studio/releases/download/v1.0.0-rc.1/Mac-Intel.dmg) | 打开 DMG，拖入“应用程序”，再从“应用程序”启动 |
-| M 系列 Mac | [M 系列 Mac 版](https://github.com/JolnJack/kpw6-pdf-studio/releases/download/v1.0.0-rc.1/Mac-M.dmg) | 打开 DMG，拖入“应用程序”，再从“应用程序”启动 |
+| Windows（Intel / AMD，64 位） | [Windows 版](https://github.com/JolnJack/kpw6-pdf-studio/releases/download/v1.0.0-rc.2/Windows.zip) | 完整解压，双击 `双击启动_Kindle精排大师.bat`，保留全部文件 |
+| Intel Mac | [Intel Mac 版](https://github.com/JolnJack/kpw6-pdf-studio/releases/download/v1.0.0-rc.2/Mac-Intel.dmg) | 打开 DMG，将 `KPW6 PDF Studio` 拖入“应用程序”，再从“应用程序”启动 |
+| M 系列 Mac | [M 系列 Mac 版](https://github.com/JolnJack/kpw6-pdf-studio/releases/download/v1.0.0-rc.2/Mac-M.dmg) | 打开 DMG，将 `KPW6 PDF Studio` 拖入“应用程序”，再从“应用程序”启动 |
 
 Mac 芯片类型可在“苹果菜单 → 关于本机”查看。**两个 Mac 版本均需要 macOS 14 或更新系统。**
 
-[PDF 使用说明](https://github.com/JolnJack/kpw6-pdf-studio/releases/download/v1.0.0-rc.1/Guide.pdf) · [在线使用说明](docs/使用说明.md) · [版本与下载页](https://github.com/JolnJack/kpw6-pdf-studio/releases/tag/v1.0.0-rc.1)
+[PDF 使用说明](https://github.com/JolnJack/kpw6-pdf-studio/releases/download/v1.0.0-rc.2/Guide.pdf) · [在线使用说明](docs/使用说明.md) · [版本与下载页](https://github.com/JolnJack/kpw6-pdf-studio/releases/tag/v1.0.0-rc.2)
 
-当前版本为 **v1.0.0-rc.1 预发布版**。Mac 包尚未完成 Developer ID 签名及 Apple 公证，可能被系统阻止打开；遇到提示请记录报错并反馈，软件不要求关闭系统安全功能。
+当前版本为 **v1.0.0-rc.2 预发布版**。Mac 包尚未完成 Developer ID 签名及 Apple 公证，首次打开若弹出系统安全拦截，可在「系统设置 → 隐私与安全性」底部点击「KPW6 PDF Studio」旁的“仍要打开”；软件不要求关闭系统全局安全功能。
 
 ## 第一次使用
 
@@ -88,9 +88,9 @@ python app.py
 - `KPW6_DATA_DIR=<路径>`：自定义数据目录；包含 `uploads/`、`outputs/` 和演示样张。
 - 源码运行默认使用项目目录；冻结应用默认使用 `~/Documents/KPW6_PDF_Studio`，目录创建失败时尝试 `~/.kpw6_pdf_studio`。
 
-上传的 PDF 会先校验；损坏、需要密码或空文档不会进入历史列表。自定义封面会完整解码校验，最多2500万像素。旧版本遗留损坏 PDF 会被忽略而不删除。上传和导出文件保留在本地，可从对应目录手动管理。
+上传的 PDF 会先校验；损坏、需要密码或空文档不会进入历史列表。自定义封面会完整解码校验，最多2500万像素。旧版本遗留损坏 PDF 会被忽略而不删除。上传文件可在侧栏一键移除，也可从本地目录手动管理。
 
-HTTP 线程不直接调用 MuPDF。文档操作由一个独立子进程的主线程依次执行；进度查询仍可响应。退出会清理 PDF 子进程和本应用启动的转换器；处理进程意外退出后，可在下一次请求中重建。
+服务仅接受本机回环 `Host` 并对浏览器请求校验同源与一次性会话令牌（防御跨站 CSRF 与 DNS Rebinding）。HTTP 线程不直接调用 MuPDF：交互预览与后台导出分别由独立的专属子进程主线程执行，长耗时导出不阻塞预览翻页，且支持随时取消活跃导出任务。退出会清理所有 PDF 子进程和本应用启动的转换器；处理进程意外退出后，可在下一次请求中重建。
 
 ### 回归验证
 
@@ -129,11 +129,10 @@ python packaging/build_windows.py
 ```bash
 python packaging/make_icon.py
 python packaging/build_macos.py
+python packaging/build_dmg.py --app-zip dist/macos/KPW6-PDF-Studio-$(uname -m).zip --output dist/macos/KPW6-PDF-Studio-$(uname -m).dmg
 ```
 
-默认输出 `dist/macos/KPW6-PDF-Studio-<架构>.zip`，内含完整的 `KPW6 PDF Studio.app`。脚本在本地临时目录装配 `Info.plist`、Cocoa 启动器、完整后端依赖、图标、对应源码及许可证，完成 ad-hoc 签名，并再次解压校验签名。最低系统版本依据实际 Python/依赖 wheel 的部署要求生成。
-
-构建脚本输出 ZIP；上方下载区的 DMG 是由已验证应用另行封装的安装映像。
+默认输出 `dist/macos/KPW6-PDF-Studio-<架构>.zip` 与对应的 `.dmg` 安装映像，内含完整的 `KPW6 PDF Studio.app`。脚本在本地临时目录装配 `Info.plist`、Cocoa 启动器、精简后的后端依赖、图标、对应源码及许可证，完成 ad-hoc 签名，并再次解压/挂载校验签名。最低系统版本依据实际 Python/依赖 wheel 的部署要求生成。可使用 `python packaging/make_user_guide.py` 重新生成 `docs/使用说明.pdf`。
 
 建议解压到本地目录使用；部分同步目录会附加 Finder 元数据，影响应用签名校验。ZIP不携带这些扩展属性。
 

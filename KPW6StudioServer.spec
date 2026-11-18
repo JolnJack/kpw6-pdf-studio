@@ -4,7 +4,7 @@ import sys
 
 project_root = Path(SPECPATH)
 sys.path.insert(0, str(project_root / 'packaging'))
-from release_support import FROZEN_EXCLUDES, write_release_metadata
+from release_support import FROZEN_EXCLUDES, prune_frozen_backend, prune_pyinstaller_toc, write_release_metadata
 
 a = Analysis(
     [str(project_root / 'app.py')],
@@ -19,6 +19,8 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+a.binaries = prune_pyinstaller_toc(a.binaries)
+a.datas = prune_pyinstaller_toc(a.datas)
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -47,4 +49,6 @@ coll = COLLECT(
     upx_exclude=[],
     name='KPW6StudioServer',
 )
-write_release_metadata(project_root, Path(DISTPATH) / 'KPW6StudioServer')
+out_server_dir = Path(DISTPATH) / 'KPW6StudioServer'
+prune_frozen_backend(out_server_dir)
+write_release_metadata(project_root, out_server_dir, backend_dir=out_server_dir)

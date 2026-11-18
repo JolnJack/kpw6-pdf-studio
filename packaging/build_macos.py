@@ -14,7 +14,7 @@ import sys
 import sysconfig
 import tempfile
 
-from release_support import runtime_distributions, write_release_metadata
+from release_support import RELEASE_METADATA_ITEMS, prune_frozen_backend, runtime_distributions, write_release_metadata
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +70,13 @@ def assemble_app(backend: Path, launcher: Path, app: Path, source_root: Path = R
     shutil.copy2(launcher, executable)
     executable.chmod(executable.stat().st_mode | 0o111)
     shutil.copytree(backend, resources / "server", symlinks=True)
+    prune_frozen_backend(resources / "server")
+    for dup_name in RELEASE_METADATA_ITEMS:
+        dup_path = resources / "server" / dup_name
+        if dup_path.is_dir() and not dup_path.is_symlink():
+            shutil.rmtree(dup_path)
+        elif dup_path.exists():
+            dup_path.unlink()
     server = resources / "server" / "KPW6StudioServer"
     server.chmod(server.stat().st_mode | 0o111)
     shutil.copy2(icon, resources / "AppIcon.icns")
@@ -80,7 +87,7 @@ def assemble_app(backend: Path, launcher: Path, app: Path, source_root: Path = R
             "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication"}
     with (contents / "Info.plist").open("wb") as stream:
         plistlib.dump(info, stream, sort_keys=True)
-    write_release_metadata(source_root, resources)
+    write_release_metadata(source_root, resources, backend_dir=resources / "server")
     return app
 
 

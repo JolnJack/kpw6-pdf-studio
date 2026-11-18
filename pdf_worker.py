@@ -132,6 +132,8 @@ def run_worker():
                 result = _operation(request['operation'], args, kwargs)
             emit({'type': 'result', 'value': result})
         except Exception as exc:
+            if stop_requested.is_set():
+                break
             emit({'type': 'error', 'kind': 'ValueError' if isinstance(exc, ValueError) else 'RuntimeError',
                   'message': str(exc) or type(exc).__name__})
 
