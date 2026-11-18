@@ -18,6 +18,9 @@ import psutil
 import pymupdf as fitz
 
 REPO = Path(os.environ.get('KPW6_TEST_REPO', Path(__file__).resolve().parents[1]))
+SRC_ROOT = REPO / 'src'
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 
 class RequestIsolationTests(unittest.TestCase):
@@ -26,8 +29,7 @@ class RequestIsolationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         old = os.environ.get('KPW6_DATA_DIR')
         os.environ['KPW6_DATA_DIR'] = self.temp.name
-        sys.path.insert(0, str(REPO))
-        self.app = importlib.import_module('app')
+        self.app = importlib.import_module('kpw6_studio.server.web_app')
         if old is None:
             os.environ.pop('KPW6_DATA_DIR', None)
         else:
@@ -78,7 +80,7 @@ class RequestIsolationTests(unittest.TestCase):
         self.assertGreater(self.app._find_available_port(0), 0)
 
     def test_loopback_server_starts_and_serves_without_reverse_dns(self):
-        from local_server import LoopbackWSGIServer
+        from kpw6_studio.server.http_server import LoopbackWSGIServer
         with patch.object(socket, 'getfqdn', side_effect=AssertionError('reverse DNS must not delay local startup')):
             server = LoopbackWSGIServer('127.0.0.1', 0, self.app.app)
         self.addCleanup(server.server_close)
@@ -93,7 +95,7 @@ class RequestIsolationTests(unittest.TestCase):
             thread.join(timeout=3)
 
     def test_worker_restarts_after_process_failure(self):
-        from pdf_service import PdfService
+        from kpw6_studio.worker.service import PdfService
         service = PdfService()
         self.addCleanup(service.close)
         path = self.app.FILES['demo_tech_book']['path']
@@ -126,6 +128,7 @@ class ProcessShutdownTests(unittest.TestCase):
             converter.chmod(0o755)
             port_file = root / 'port.txt'
             env = {**os.environ, 'KPW6_DATA_DIR': str(root / 'data'),
+                   'PYTHONPATH': str(SRC_ROOT) + os.pathsep + os.environ.get('PYTHONPATH', ''),
                    'PATH': str(binary_dir) + os.pathsep + os.environ.get('PATH', ''),
                    'PYTHONDONTWRITEBYTECODE': '1'}
             log = (root / 'server.log').open('w')
@@ -135,7 +138,7 @@ class ProcessShutdownTests(unittest.TestCase):
             launcher = ('import faulthandler,runpy,sys; '
                         'faulthandler.dump_traceback_later(15, repeat=True); '
                         'runpy.run_path(sys.argv.pop(1), run_name="__main__")')
-            server = subprocess.Popen([sys.executable, '-u', '-c', launcher, str(REPO / 'app.py'), '--no-browser', '--port', str(preferred_port), '--port-file', str(port_file)],
+            server = subprocess.Popen([sys.executable, '-u', '-c', launcher, str(SRC_ROOT / 'kpw6_studio' / '__main__.py'), '--no-browser', '--port', str(preferred_port), '--port-file', str(port_file)],
                                       env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             converter_pid = None
             request_thread = None

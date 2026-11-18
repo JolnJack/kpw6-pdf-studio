@@ -129,4 +129,4 @@ def build_icons(out_dir: str):
 
 
 if __name__ == "__main__":
-    build_icons(os.path.dirname(os.path.abspath(__file__)))
+    build_icons(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets"))

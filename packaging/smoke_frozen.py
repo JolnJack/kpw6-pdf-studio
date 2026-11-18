@@ -45,6 +45,8 @@ def smoke(binary, report=None):
                 assert Path(health['output_dir']).resolve() == (root / 'data' / 'outputs').resolve()
                 result['health'] = True
                 assert b'KPW6' in request(base, '/')
+                assert b':root' in request(base, '/static/styles.css')
+                assert b'refreshPreview' in request(base, '/static/app.js')
                 options = {'file_id': 'demo_tech_book', 'mode': 'tech_book', 'cover_mode': 'none'}
                 preview = json.loads(request(base, '/api/preview', options))
                 assert preview['kpw6_screens_count'] > 0

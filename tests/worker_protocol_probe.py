@@ -10,8 +10,11 @@ import threading
 
 
 def main():
-    worker = Path(__file__).resolve().parents[1] / 'pdf_worker.py'
+    repo_root = Path(__file__).resolve().parents[1]
+    src_root = repo_root / 'src'
+    worker = src_root / 'kpw6_studio' / 'worker' / 'protocol.py'
     launcher = ('import faulthandler,runpy,sys; '
+                f'sys.path.insert(0, {str(src_root)!r}); '
                 'faulthandler.dump_traceback_later(10, repeat=True); '
                 'runpy.run_path(sys.argv.pop(1), run_name="__main__")')
     with tempfile.TemporaryDirectory() as directory:

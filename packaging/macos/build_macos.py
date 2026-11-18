@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import argparse
-from importlib import metadata
-import os
 from pathlib import Path
 import platform
 import plistlib
@@ -14,32 +12,31 @@ import sys
 import sysconfig
 import tempfile
 
+PACKAGING_DIR = Path(__file__).resolve().parents[1]
+ROOT = PACKAGING_DIR.parent
+if str(PACKAGING_DIR) not in sys.path:
+    sys.path.insert(0, str(PACKAGING_DIR))
+
 from release_support import RELEASE_METADATA_ITEMS, prune_frozen_backend, runtime_distributions, write_release_metadata
 
-
-ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = "KPW6 PDF Studio.app"
 
 
 def prepare_for_signing(app: Path):
-    """Clear copied Finder/resource-fork metadata from this newly built app.
-
-    Apple QA1940 forbids these attributes in a signed bundle. This operates
-    only on the assembled output; source files and system apps are untouched.
-    """
+    """Clear copied Finder/resource-fork metadata from this newly built app."""
     app = Path(app)
-    if not app.is_dir() or app.is_symlink() or app.suffix != '.app':
-        raise ValueError('Expected the newly assembled .app directory')
-    subprocess.run(['xattr', '-cr', str(app)], check=True)
+    if not app.is_dir() or app.is_symlink() or app.suffix != ".app":
+        raise ValueError("Expected the newly assembled .app directory")
+    subprocess.run(["xattr", "-cr", str(app)], check=True)
 
 
 def archive_app(app: Path, archive: Path):
     """Keep permissions/symlinks, without Finder/resource-fork sidecar data."""
     archive = Path(archive)
     if archive.exists():
-        raise FileExistsError(f'Use a new output archive: {archive}')
+        raise FileExistsError(f"Use a new output archive: {archive}")
     archive.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(['ditto', '-c', '-k', '--keepParent', '--norsrc', str(app), str(archive)], check=True)
+    subprocess.run(["ditto", "-c", "-k", "--keepParent", "--norsrc", str(app), str(archive)], check=True)
 
 
 def minimum_macos_version(distributions) -> str:
@@ -53,8 +50,14 @@ def minimum_macos_version(distributions) -> str:
     return ".".join(map(str, max(versions)))
 
 
-def assemble_app(backend: Path, launcher: Path, app: Path, source_root: Path = ROOT,
-                 icon: Path = ROOT / "packaging" / "AppIcon.icns", minimum_system: str = "11.0"):
+def assemble_app(
+    backend: Path,
+    launcher: Path,
+    app: Path,
+    source_root: Path = ROOT,
+    icon: Path = PACKAGING_DIR / "assets" / "AppIcon.icns",
+    minimum_system: str = "11.0",
+):
     backend, launcher, app, icon = map(Path, (backend, launcher, app, icon))
     if not (backend / "KPW6StudioServer").is_file():
         raise FileNotFoundError(f"Missing frozen backend: {backend}")
@@ -80,11 +83,19 @@ def assemble_app(backend: Path, launcher: Path, app: Path, source_root: Path = R
     server = resources / "server" / "KPW6StudioServer"
     server.chmod(server.stat().st_mode | 0o111)
     shutil.copy2(icon, resources / "AppIcon.icns")
-    info = {"CFBundleName": "KPW6 PDF Studio", "CFBundleDisplayName": "KPW6 PDF Studio",
-            "CFBundleIdentifier": "io.github.jolnjack.kpw6-pdf-studio", "CFBundleExecutable": executable.name,
-            "CFBundlePackageType": "APPL", "CFBundleIconFile": "AppIcon.icns",
-            "CFBundleShortVersionString": "1.0", "CFBundleVersion": "1", "LSMinimumSystemVersion": minimum_system,
-            "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication"}
+    info = {
+        "CFBundleName": "KPW6 PDF Studio",
+        "CFBundleDisplayName": "KPW6 PDF Studio",
+        "CFBundleIdentifier": "io.github.jolnjack.kpw6-pdf-studio",
+        "CFBundleExecutable": executable.name,
+        "CFBundlePackageType": "APPL",
+        "CFBundleIconFile": "AppIcon.icns",
+        "CFBundleShortVersionString": "1.0.0",
+        "CFBundleVersion": "1",
+        "LSMinimumSystemVersion": minimum_system,
+        "NSHighResolutionCapable": True,
+        "NSPrincipalClass": "NSApplication",
+    }
     with (contents / "Info.plist").open("wb") as stream:
         plistlib.dump(info, stream, sort_keys=True)
     write_release_metadata(source_root, resources, backend_dir=resources / "server")
@@ -105,24 +116,35 @@ def main():
         parser.error(f"Deployment target must be at least {minimum}, matching the installed runtime dependencies")
     work = args.work_dir.resolve()
     work.mkdir(parents=True, exist_ok=True)
-    subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--distpath", str(work / "dist"),
-                    "--workpath", str(work / "build"), str(ROOT / "KPW6StudioServer.spec")], cwd=ROOT, check=True)
+    subprocess.run(
+        [
+            sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
+            "--distpath", str(work / "dist"),
+            "--workpath", str(work / "build"),
+            str(PACKAGING_DIR / "pyinstaller.spec"),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
     launcher = work / "KPW6StudioLauncher"
-    subprocess.run(["swiftc", "-O", "-target", f"{platform.machine()}-apple-macosx{target}",
-                    str(ROOT / "packaging" / "macos_tray.swift"), "-o", str(launcher), "-framework", "Cocoa"], check=True)
-    # File-provider/synced output folders can re-add FinderInfo while codesign
-    # runs. Sign and verify in local staging, then transport the verified bundle
-    # as a ZIP that does not carry those forbidden extended attributes.
+    subprocess.run(
+        [
+            "swiftc", "-O", "-target", f"{platform.machine()}-apple-macosx{target}",
+            str(PACKAGING_DIR / "macos" / "macos_tray.swift"),
+            "-o", str(launcher), "-framework", "Cocoa",
+        ],
+        check=True,
+    )
     archive = args.output_dir.resolve() / f"KPW6-PDF-Studio-{platform.machine()}.zip"
-    with tempfile.TemporaryDirectory(prefix='kpw6-app-staging-') as staging:
+    with tempfile.TemporaryDirectory(prefix="kpw6-app-staging-") as staging:
         app = assemble_app(work / "dist" / "KPW6StudioServer", launcher, Path(staging) / APP_NAME, minimum_system=target)
         prepare_for_signing(app)
         subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app)], check=True)
         subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
         archive_app(app, archive)
-        with tempfile.TemporaryDirectory(prefix='kpw6-app-verify-') as verify:
-            subprocess.run(['ditto', '-x', '-k', str(archive), verify], check=True)
-            subprocess.run(['codesign', '--verify', '--deep', '--strict', str(Path(verify) / APP_NAME)], check=True)
+        with tempfile.TemporaryDirectory(prefix="kpw6-app-verify-") as verify:
+            subprocess.run(["ditto", "-x", "-k", str(archive), verify], check=True)
+            subprocess.run(["codesign", "--verify", "--deep", "--strict", str(Path(verify) / APP_NAME)], check=True)
     print(f"Created verified {platform.machine()} distribution: {archive} (macOS {target}+; local ad-hoc signature)")
     print("Developer ID signing and notarization are separate distribution steps.")
 

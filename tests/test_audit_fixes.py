@@ -18,7 +18,12 @@ import zipfile
 import pymupdf as fitz
 from PIL import Image
 
-import pdf_engine as engine
+SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from kpw6_studio import engine
+from kpw6_studio.engine import document as engine_document
 
 
 class EngineAuditFixesTests(unittest.TestCase):
@@ -73,7 +78,7 @@ class EngineAuditFixesTests(unittest.TestCase):
             return orig_bake(d)
 
         opts = engine.ProcessOptions(mode="tech_book", cover_mode="none")
-        with patch.object(engine, "_bake_and_normalize_doc", side_effect=counting_bake):
+        with patch.object(engine_document, "_bake_and_normalize_doc", side_effect=counting_bake):
             engine.render_preview_comparison(str(src), 0, opts)
             engine.render_preview_comparison(str(src), 2, opts)
             engine.render_hd_zoom_image(str(src), 1, opts, target_type="kpw6", screen_idx=0)
@@ -166,7 +171,7 @@ class WebSecurityAndServiceAuditTests(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory()
         cls.module_name = "_kpw6_audit_fixes_test_app"
         spec = importlib.util.spec_from_file_location(
-            cls.module_name, Path(__file__).resolve().parents[1] / "app.py"
+            cls.module_name, SRC_ROOT / "kpw6_studio" / "server" / "web_app.py"
         )
         cls.module = importlib.util.module_from_spec(spec)
         sys.modules[cls.module_name] = cls.module
@@ -225,9 +230,13 @@ class WebSecurityAndServiceAuditTests(unittest.TestCase):
         )
         self.assertEqual(r_no_tok.status_code, 403)
 
-        # Same-origin browser POST with valid X-KPW6-Token succeeds
+        # Same-origin browser POST with valid X-KPW6-Token succeeds, and decoupled static assets load
         html_page = self.client.get("/", headers={"Host": "127.0.0.1:8765"}).data.decode("utf-8")
         self.assertIn(self.module.APP_CSRF_TOKEN, html_page)
+        with self.client.get("/static/styles.css", headers={"Host": "127.0.0.1:8765"}) as r_css:
+            self.assertEqual(r_css.status_code, 200)
+        with self.client.get("/static/app.js", headers={"Host": "127.0.0.1:8765"}) as r_js:
+            self.assertEqual(r_js.status_code, 200)
         r_ok = self.client.post(
             "/api/preview",
             json={"file_id": "demo_tech_book", "cover_mode": "none"},
@@ -390,7 +399,7 @@ class PackagingSlimAndGuideTests(unittest.TestCase):
 
     def test_hdiutil_retry_handles_transient_resource_busy(self):
         repo_root = Path(__file__).resolve().parents[1]
-        sys.path.insert(0, str(repo_root / "packaging"))
+        sys.path.insert(0, str(repo_root / "packaging" / "macos"))
         import build_dmg
 
         class _FakeProc:

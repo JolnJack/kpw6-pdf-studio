@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KPW6 签名版 全能 PDF / 漫画 / 纯文字 EPUB 工作台 (免越狱五合一)</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="brand-badge">KPW6 签名版 · 五合一全能版</span>
+    <div>
+      <h1>Kindle PDF / 漫画 / 纯文字重排 & 去网格工作台</h1>
+      <p>免越狱 · 页码跳转 / 图表索引 / KPW6 版式预览 / 高清放大镜 · 支持导出 EPUB 供传书使用</p>
+    </div>
+  </div>
+  <div class="header-actions">
+    <a class="btn" href="https://github.com/JolnJack/kpw6-pdf-studio" target="_blank" rel="noopener noreferrer">源码与许可 · AGPLv3</a>
+    <button class="btn" onclick="openOutputFolder()">📂 打开导出目录</button>
+    <a class="btn btn-primary" href="https://www.amazon.com/sendtokindle" target="_blank">☁️ 打开官方 Send to Kindle 网页</a>
+  </div>
+</header>
+
+<div class="workspace">
+  <aside class="sidebar">
+    <div>
+      <div class="section-title">1. 上传或切换 PDF 文档</div>
+      <div class="dropzone" id="dropzone" onclick="document.getElementById('fileInput').click()">
+        <input type="file" id="fileInput" accept=".pdf" style="display:none" onchange="handleFileUpload(this.files[0])">
+        <h3 id="currentFileName">📥 点击上传或将 PDF 拖到这里</h3>
+        <p>上传后自动检测类型并建立全书图表索引</p>
+      </div>
+      <div class="detect-banner" id="detectBanner"></div>
+
+      <div class="demo-pills" id="uploadedFilesWrap" style="display:none;">
+        <span style="font-size:11px;color:#38bdf8;align-self:center;width:100%;font-weight:600;">📂 你上传的 PDF 文档（点击即切换）：</span>
+        <div id="uploadedFilesPills" style="display:flex;flex-wrap:wrap;gap:5px;width:100%;"></div>
+      </div>
+
+      <div class="demo-pills">
+        <span style="font-size:11px;color:var(--muted);align-self:center;width:100%;">内置 5 大类型测试样张：</span>
+        <button class="pill" id="pill-demo_academic_2col" onclick="loadDemo('demo_academic_2col', 'academic_2col')">📄 1.双栏论文</button>
+        <button class="pill" id="pill-demo_tech_book" onclick="loadDemo('demo_tech_book', 'tech_book')">📊 2.图表专业书</button>
+        <button class="pill" id="pill-demo_scanned_book" onclick="loadDemo('demo_scanned_book', 'scanned_book')">🔍 3.泛黄扫描书</button>
+        <button class="pill" id="pill-demo_comic_manga" onclick="loadDemo('demo_comic_manga', 'comic_manga')">🎨 4.PDF漫画跨页</button>
+        <button class="pill" id="pill-demo_pure_text" onclick="loadDemo('demo_pure_text', 'pure_text')">📖 5.纯文字小说</button>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">2. 五大专属文档重排引擎</div>
+      <div class="mode-cards">
+        <div class="mode-card active" id="card-academic_2col" onclick="selectMode('academic_2col')">
+          <h4><span>📄 双栏学术论文</span><span style="color:#38bdf8;font-size:11.5px;">跨栏图表保护 + 旋转扶正</span></h4>
+          <p>识别跨栏表格与附图，支持旋转图表与双栏分屏；导出前可逐页预览并调整。</p>
+        </div>
+        <div class="mode-card" id="card-tech_book" onclick="selectMode('tech_book')">
+          <h4><span>📊 带图表的专业书</span><span style="color:#10b981;font-size:11.5px;">图表版面保护</span></h4>
+          <p>裁切白边与页眉页脚，支持竖屏或横屏大字模式；复杂图表可手动设为整页保留。</p>
+        </div>
+        <div class="mode-card" id="card-scanned_book" onclick="selectMode('scanned_book')">
+          <h4><span>🔍 扫描版书籍</span><span style="color:#f59e0b;font-size:11.5px;">灰底与墨迹增强</span></h4>
+          <p>提亮泛黄或浅灰背景，并增强文字对比度；实际效果请结合原图与预览确认。</p>
+        </div>
+        <div class="mode-card" id="card-comic_manga" onclick="selectMode('comic_manga')">
+          <h4><span>🎨 PDF 漫画 / 纯图画册</span><span style="color:#f43f5e;font-size:11.5px;">双页拆切+满屏</span></h4>
+          <p>自动识别横版双页跨页并从中缝切为两屏，支持日漫右➔左顺序与无白边满屏。</p>
+        </div>
+        <div class="mode-card" id="card-pure_text" onclick="selectMode('pure_text')">
+          <h4><span>📖 纯文字 PDF 书籍</span><span style="color:#a78bfa;font-size:11.5px;">转原生 EPUB + 重排</span></h4>
+          <p>剔除页眉页码、智能合并断句、识别章节目录，支持导出原生可调字号 EPUB。</p>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">3. 模式专属参数微调 & 扫描去污纠偏</div>
+      <div class="control-group">
+        <div id="ctrlCommon">
+          <label class="checkbox-row" style="margin-bottom:6px;">
+            <span>智能行间切分与屏幕重排</span>
+            <input type="checkbox" id="optSplitPages" checked onchange="refreshPreview()">
+          </label>
+          <label class="checkbox-row" style="margin-bottom:6px;">
+            <span>自动剔除页眉与页码页脚</span>
+            <input type="checkbox" id="optTrimHeader" checked onchange="refreshPreview()">
+          </label>
+          <label class="checkbox-row" style="margin-bottom:6px;">
+            <span>横屏大字模式 (适合单栏/宽表)</span>
+            <input type="checkbox" id="optLandscape" onchange="refreshPreview()">
+          </label>
+          <label class="checkbox-row" style="margin-bottom:6px;">
+            <span>Carta 1300 去网格漂白与黑度增强</span>
+            <input type="checkbox" id="optEnhance" onchange="refreshPreview()">
+          </label>
+          <div style="border-top:1px solid rgba(255,255,255,0.08);padding-top:7px;margin-top:4px;display:flex;flex-direction:column;gap:6px;">
+            <div style="font-size:10.5px;color:#fbbf24;font-weight:600;">🧹 扫描件/旧书深度净化与纠偏：</div>
+            <label class="checkbox-row" title="自动识别并切除左右两侧孤立的复印机装订黑边与装订孔阴影，释放宝贵屏宽">
+              <span>✂️ 切除书脊装订黑边与打孔阴影</span>
+              <input type="checkbox" id="optCleanSpine" checked onchange="refreshPreview()">
+            </label>
+            <label class="checkbox-row" title="剥离页面背景上的浅灰色斜体水印、印章残影与扫描底噪，避免遮挡正文或撑大白边">
+              <span>🧼 剥离浅灰水印与底纹噪点</span>
+              <input type="checkbox" id="optRemoveWatermark" onchange="refreshPreview()">
+            </label>
+            <label class="checkbox-row" title="通过行投影方差检测扫描歪斜角度（±3°以内）并自动旋转扶正">
+              <span>📐 扫描页面歪斜自动扶正 (Deskew)</span>
+              <input type="checkbox" id="optAutoDeskew" onchange="refreshPreview()">
+            </label>
+          </div>
+        </div>
+
+        <div id="ctrlComic" style="display:none;border-top:1px solid var(--border);padding-top:8px;">
+          <label class="checkbox-row" style="margin-bottom:6px;">
+            <span>横版双页跨页自动居中切开</span>
+            <input type="checkbox" id="optComicSplit" checked onchange="refreshPreview()">
+          </label>
+          <label class="checkbox-row" style="margin-bottom:6px;">
+            <span>日漫翻页顺序 (先看右半页 ➔ 再看左半页)</span>
+            <input type="checkbox" id="optMangaRtl" checked onchange="refreshPreview()">
+          </label>
+          <label class="checkbox-row">
+            <span>满屏无白边模式 (Full-Bleed 铺满屏幕)</span>
+            <input type="checkbox" id="optComicBleed" checked onchange="refreshPreview()">
+          </label>
+        </div>
+
+        <div id="ctrlPureText" style="display:none;border-top:1px solid var(--border);padding-top:8px;">
+          <div class="slider-row" style="margin-bottom:7px;">
+            <label><span>重排 PDF 字号大小 (pt)</span><span id="valFontSize">13.5 pt</span></label>
+            <input type="range" id="optFontSize" min="10.0" max="20.0" step="0.5" value="13.5" onchange="document.getElementById('valFontSize').innerText=this.value+' pt'; refreshPreview()">
+          </div>
+          <div class="slider-row">
+            <label><span>重排行距倍数</span><span id="valLineSpacing">1.65x</span></label>
+            <input type="range" id="optLineSpacing" min="1.30" max="2.10" step="0.05" value="1.65" onchange="document.getElementById('valLineSpacing').innerText=this.value+'x'; refreshPreview()">
+          </div>
+        </div>
+
+        <div class="slider-row" id="sliderGammaWrap">
+          <label><span>墨迹/线条加深强度 (Gamma)</span><span id="valGamma">0.55</span></label>
+          <input type="range" id="optGamma" min="0.30" max="0.90" step="0.05" value="0.55" onchange="document.getElementById('valGamma').innerText=this.value; refreshPreview()">
+        </div>
+        <div class="slider-row" id="sliderMarginWrap">
+          <label><span>KPW6 屏幕留白边距 (%)</span><span id="valMargin">2.5%</span></label>
+          <input type="range" id="optMargin" min="0.5" max="6.0" step="0.5" value="2.5" onchange="document.getElementById('valMargin').innerText=this.value+'%'; refreshPreview()">
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title" style="color:#38bdf8;">4. ✨ 超清画质增强档位 & 笔画加粗控制</div>
+      <div class="control-group" style="border-color:rgba(56,189,248,0.35);background:rgba(15,23,42,0.65);">
+        <div class="seg-group">
+          <div class="seg-group-label">
+            <span>输出超采样清晰度档位</span>
+            <span id="valDpiPreset" style="color:#38bdf8;font-weight:600;">450 PPI (1.5x 超清)</span>
+          </div>
+          <div class="seg-row">
+            <button type="button" class="seg-btn" id="dpi-300" onclick="setDpiPreset(300)">300 PPI<br><span style="font-size:9.5px;opacity:0.8;">标准轻巧</span></button>
+            <button type="button" class="seg-btn active" id="dpi-450" onclick="setDpiPreset(450)">450 PPI<br><span style="font-size:9.5px;opacity:0.9;">1.5x超清推荐</span></button>
+            <button type="button" class="seg-btn" id="dpi-600" onclick="setDpiPreset(600)">600 PPI<br><span style="font-size:9.5px;opacity:0.85;">2.0x超采样</span></button>
+          </div>
+        </div>
+
+        <div class="seg-group" style="margin-top:3px;">
+          <div class="seg-group-label">
+            <span>字体/图纸线条加粗档位</span>
+            <span id="valStrokeBold" style="color:#6ee7b7;font-weight:600;">0: 原细度</span>
+          </div>
+          <div class="seg-row" style="grid-template-columns: repeat(4, 1fr);">
+            <button type="button" class="seg-btn active-emerald" id="bold-0" onclick="setStrokeBoldness(0)">0 级<br><span style="font-size:9.5px;opacity:0.85;">原细度</span></button>
+            <button type="button" class="seg-btn" id="bold-1" onclick="setStrokeBoldness(1)">+1 微粗<br><span style="font-size:9.5px;opacity:0.85;">修断笔</span></button>
+            <button type="button" class="seg-btn" id="bold-2" onclick="setStrokeBoldness(2)">+2 中粗<br><span style="font-size:9.5px;opacity:0.85;">黑体护眼</span></button>
+            <button type="button" class="seg-btn" id="bold-3" onclick="setStrokeBoldness(3)">+3 强粗<br><span style="font-size:9.5px;opacity:0.85;">极细图纸</span></button>
+          </div>
+        </div>
+
+        <div class="slider-row" style="margin-top:3px;">
+          <label><span>边缘锐化强度 (Unsharp Mask)</span><span id="valSharpen" style="color:#38bdf8;">1.6x</span></label>
+          <input type="range" id="optSharpen" min="0.0" max="2.5" step="0.1" value="1.6" onchange="document.getElementById('valSharpen').innerText=parseFloat(this.value).toFixed(1)+'x'; refreshPreview()">
+        </div>
+
+        <label class="checkbox-row" style="margin-top:2px;border-top:1px solid rgba(255,255,255,0.07);padding-top:6px;" title="在适用的 PDF 页面上保留矢量文字与公式路径；图像增强、加粗等选项可能需要栅格化">
+          <span>保留原生矢量内容 (适用时)</span>
+          <input type="checkbox" id="optVectorLossless" checked onchange="refreshPreview()">
+        </label>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title" style="color:#c084fc;">5. 🖼️ Kindle 书架/锁屏封面生成设置</div>
+      <div class="control-group" style="border-color:rgba(192,132,252,0.35);background:rgba(15,23,42,0.65);">
+        <div class="seg-group">
+          <div class="seg-group-label">
+            <span>封面生成样式 (第 1 页实时预览)</span>
+            <span id="valCoverMode" style="color:#c084fc;font-weight:600;">精装书封卡</span>
+          </div>
+          <div class="seg-row" style="grid-template-columns: repeat(4, 1fr);">
+            <button type="button" class="seg-btn active" id="cov-smart_card" onclick="setCoverMode('smart_card')">精装卡面<br><span style="font-size:9px;opacity:0.85;">标题+首页</span></button>
+            <button type="button" class="seg-btn" id="cov-first_page" onclick="setCoverMode('first_page')">原书首页<br><span style="font-size:9px;opacity:0.85;">完整不切</span></button>
+            <button type="button" class="seg-btn" id="cov-custom_image" onclick="setCoverMode('custom_image')">自定义图<br><span style="font-size:9px;opacity:0.85;">上传海报</span></button>
+            <button type="button" class="seg-btn" id="cov-none" onclick="setCoverMode('none')">无封面<br><span style="font-size:9px;opacity:0.85;">直接切分</span></button>
+          </div>
+        </div>
+
+        <div id="coverTextInputs" style="display:flex;flex-direction:column;gap:5px;margin-top:3px;">
+          <input type="text" id="optCoverTitle" placeholder="自定义封面书名（留空则自动提取论文/书籍标题）"
+                 style="background:#0f172a;border:1px solid var(--border);color:#f8fafc;border-radius:6px;padding:5px 8px;font-size:11.5px;width:100%;"
+                 onchange="if(currentPage!==0){jumpToPage(0);}else{refreshPreview(0);}">
+          <input type="text" id="optCoverAuthor" placeholder="自定义作者/副标题（留空则自动标注）"
+                 style="background:#0f172a;border:1px solid var(--border);color:#cbd5e1;border-radius:6px;padding:5px 8px;font-size:11.5px;width:100%;"
+                 onchange="if(currentPage!==0){jumpToPage(0);}else{refreshPreview(0);}">
+        </div>
+
+        <div id="coverUploadWrap" style="display:none;margin-top:4px;">
+          <input type="file" id="coverFileInput" accept="image/*" style="display:none" onchange="handleCoverUpload(this.files[0])">
+          <button type="button" class="btn btn-sm" style="width:100%;justify-content:center;" onclick="document.getElementById('coverFileInput').click()">
+            🖼️ 点击上传自定义封面图片 (.jpg / .png)
+          </button>
+          <div id="coverUploadStatus" style="font-size:10.5px;color:#c084fc;margin-top:3px;text-align:center;"></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title" style="color:#10b981;">6. 📦 导出格式、页码范围 & 大书自动分卷</div>
+      <div class="control-group" style="border-color:rgba(16,185,129,0.35);background:rgba(15,23,42,0.65);">
+        <div class="seg-group">
+          <div class="seg-group-label">
+            <span>目标电子书格式</span>
+            <span id="valExportFormat" style="color:#6ee7b7;font-weight:600;">.EPUB (版面精排+封面)</span>
+          </div>
+          <div class="seg-row" style="grid-template-columns: repeat(3, 1fr);">
+            <button type="button" class="seg-btn active-emerald" id="fmt-epub_layout" onclick="setExportFormat('epub_layout')">.EPUB 精排<br><span style="font-size:9px;opacity:0.88;">云传有封面★</span></button>
+            <button type="button" class="seg-btn" id="fmt-pdf" onclick="setExportFormat('pdf')">.PDF 专享<br><span style="font-size:9px;opacity:0.85;">矢量优先</span></button>
+            <button type="button" class="seg-btn" id="fmt-azw3" onclick="setExportFormat('azw3')">.AZW3 原生<br><span style="font-size:9px;opacity:0.85;">USB直传★</span></button>
+            <button type="button" class="seg-btn" id="fmt-epub_reflow" onclick="setExportFormat('epub_reflow')">.EPUB 流式<br><span style="font-size:9px;opacity:0.85;">可调字号</span></button>
+            <button type="button" class="seg-btn" id="fmt-mobi" onclick="setExportFormat('mobi')">.MOBI 经典<br><span style="font-size:9px;opacity:0.85;">旧版兼容</span></button>
+            <button type="button" class="seg-btn" id="fmt-cbz" onclick="setExportFormat('cbz')">.CBZ 图集<br><span style="font-size:9px;opacity:0.85;">无损漫画包</span></button>
+          </div>
+        </div>
+        <div id="formatHintText" style="font-size:10.5px;color:#cbd5e1;line-height:1.4;background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.28);padding:6px 8px;border-radius:6px;margin-top:2px;">
+          ✨ <strong>图像版 EPUB：</strong>保留生成的分屏图像，内置封面与图表目录。可尝试通过 Send to Kindle 传书；设备上的版式与封面显示请实际确认。
+        </div>
+
+        <div style="border-top:1px solid rgba(255,255,255,0.08);padding-top:7px;margin-top:3px;display:flex;flex-direction:column;gap:6px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:11.5px;">
+            <span style="color:#cbd5e1;font-weight:500;">📑 导出页码范围截取</span>
+            <div style="display:flex;gap:4px;">
+              <button type="button" class="pill" style="padding:2px 6px;font-size:10px;" onclick="setPageRangeAll()">全书范围</button>
+              <button type="button" class="pill" style="padding:2px 6px;font-size:10px;border-color:#38bdf8;color:#93c5fd;" onclick="setPageRangeCurrent()">仅导当前页</button>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;font-size:11.5px;">
+            <span style="color:var(--muted);">从第</span>
+            <input type="number" id="optStartPage" min="1" value="1"
+                   style="width:64px;background:#0f172a;border:1px solid var(--border);color:#fff;border-radius:6px;padding:4px 6px;text-align:center;font-weight:600;">
+            <span style="color:var(--muted);">页 到第</span>
+            <input type="number" id="optEndPage" min="1" placeholder="末页"
+                   style="width:64px;background:#0f172a;border:1px solid var(--border);color:#fff;border-radius:6px;padding:4px 6px;text-align:center;font-weight:600;">
+            <span style="color:var(--muted);">页</span>
+          </div>
+        </div>
+
+        <div class="seg-group" style="border-top:1px solid rgba(255,255,255,0.08);padding-top:7px;margin-top:2px;">
+          <div class="seg-group-label">
+            <span>📚 大书自动分卷 (防超200M)</span>
+            <span id="valSplitVol" style="color:#fbbf24;font-weight:600;">整本不拆卷</span>
+          </div>
+          <div class="seg-row" style="grid-template-columns: repeat(4, 1fr);">
+            <button type="button" class="seg-btn active" id="vol-0" onclick="setSplitVolumes(0)">整本导出<br><span style="font-size:9px;opacity:0.85;">单文件</span></button>
+            <button type="button" class="seg-btn" id="vol-50" onclick="setSplitVolumes(50)">50页/卷<br><span style="font-size:9px;opacity:0.85;">轻量分册</span></button>
+            <button type="button" class="seg-btn" id="vol-100" onclick="setSplitVolumes(100)">100页/卷<br><span style="font-size:9px;opacity:0.88;">大书推荐★</span></button>
+            <button type="button" class="seg-btn" id="vol-150" onclick="setSplitVolumes(150)">150页/卷<br><span style="font-size:9px;opacity:0.85;">长卷分册</span></button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:7px;">
+      <button class="btn btn-emerald" style="padding:11px;font-size:13px;justify-content:center;" id="mainExportBtn" onclick="exportSelectedFormat()">
+        🚀 一键导出【.EPUB 满屏精排版】
+      </button>
+      <button class="btn btn-purple" style="padding:8px;font-size:11.5px;justify-content:center;" id="bundleExportBtn" onclick="exportSelectedFormat('bundle_both')">
+        ⚡ 同时生成【.PDF 矢量版 + .EPUB 版】双文件
+      </button>
+    </div>
+  </aside>
+
+  <main class="main-stage">
+    <!-- Real-Time Export Progress Panel -->
+    <div id="exportProgressPanel" style="display:none;background:rgba(30,41,59,0.96);border:1px solid #3b82f6;border-radius:11px;padding:12px 16px;flex-direction:column;gap:8px;box-shadow:0 8px 24px rgba(0,0,0,0.35);">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span id="exportProgressSpinner" style="font-size:15px;">⚙️</span>
+          <strong id="exportProgressTitle" style="font-size:13px;color:#f8fafc;">正在为 KPW6 精排生成电子书...</strong>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;font-size:12px;">
+          <span id="exportProgressEta" style="color:#93c5fd;">已用时 0.0s · 正在估算剩余时间...</span>
+          <span id="exportProgressPct" style="background:#3b82f6;color:#fff;padding:2px 8px;border-radius:999px;font-weight:700;font-size:11.5px;">0%</span>
+          <button type="button" class="btn btn-sm" id="cancelExportBtn" style="border-color:#ef4444;color:#fca5a5;padding:3px 9px;" onclick="cancelActiveExport()">⏹ 取消</button>
+        </div>
+      </div>
+      <div style="width:100%;height:9px;background:#0f172a;border-radius:999px;overflow:hidden;border:1px solid #334155;">
+        <div id="exportProgressBarFill" style="width:2%;height:100%;background:linear-gradient(90deg, #3b82f6, #10b981);transition:width 0.25s ease;"></div>
+      </div>
+    </div>
+
+    <div class="toast" id="exportToast">
+      <span id="toastText">✅ 处理完成！</span>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <a class="btn btn-primary" id="viewPdfOnlineLink" href="#" target="_blank" style="display:none;">👁️ 在浏览器新标签页通览整本成品 PDF</a>
+        <a class="btn btn-emerald" id="downloadLink" href="#" download>💾 下载主文件到本地</a>
+        <a class="btn btn-purple" id="downloadSecondLink" href="#" download style="display:none;">💾 下载配套 EPUB</a>
+        <div id="volumeDownloadsContainer" style="display:none;gap:6px;flex-wrap:wrap;"></div>
+        <button class="btn" onclick="openOutputFolder()">📂 打开输出文件夹</button>
+      </div>
+    </div>
+
+    <!-- Upgraded Navigation & Quick-Jump Bar -->
+    <div class="nav-panel">
+      <div class="nav-top-row">
+        <div class="page-controls">
+          <button class="btn btn-sm" onclick="jumpToPage(0)" title="跳到第一页">⏮ 首页</button>
+          <button class="btn btn-sm" onclick="changePage(-5)" title="快退 5 页">-5页</button>
+          <button class="btn btn-sm btn-primary" onclick="changePage(-1)" title="快捷键：↑ 或 PageUp">⬅️ 上一页</button>
+          <span style="font-size:12.5px;display:inline-flex;align-items:center;gap:4px;">
+            第
+            <input type="number" id="pageInputBox" class="page-input" min="1" value="1"
+                   onkeydown="if(event.key==='Enter') jumpToPage(parseInt(this.value||1)-1)"
+                   onchange="jumpToPage(parseInt(this.value||1)-1)">
+            / <strong id="totalPagesNum">1</strong> 页
+          </span>
+          <button class="btn btn-sm btn-primary" onclick="changePage(1)" title="快捷键：↓ 或 PageDown">下一页 ➡️</button>
+          <button class="btn btn-sm" onclick="changePage(5)" title="快进 5 页">+5页</button>
+          <button class="btn btn-sm" onclick="jumpToPage(totalPages - 1)" title="跳到最后一页">末页 ⏭</button>
+        </div>
+
+        <div class="page-slider-wrap" title="拖动滑块快速跳到任意页">
+          <span style="font-size:11px;color:var(--muted);">滑块跳页</span>
+          <input type="range" id="pageSlider" min="1" max="1" value="1"
+                 oninput="document.getElementById('pageInputBox').value=this.value"
+                 onchange="jumpToPage(parseInt(this.value)-1)">
+        </div>
+
+        <div class="stats-badges">
+          <div class="stat-badge">识别区块：<strong id="statSlices">-</strong> 个</div>
+          <div class="stat-badge">生成屏幕：<strong id="statScreens">-</strong> 屏</div>
+          <div class="stat-badge">字号放大：<strong id="statZoom">-</strong> 倍</div>
+          <div class="stat-badge" title="当前画质档位与笔画加粗状态">画质引擎：<strong id="statQualityMode" style="color:#6ee7b7;">450 PPI · 矢量优先</strong></div>
+        </div>
+      </div>
+
+      <!-- Per-Page Special Rule Override Bar -->
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <span style="font-size:11.5px;color:#cbd5e1;font-weight:600;">🎯 本页单独微调（第 <span id="overridePageNumLabel">1</span> 页）：</span>
+          <button type="button" class="pill active" id="ovr-auto" onclick="setPageOverride('auto')">✨ 跟随全局自动</button>
+          <button type="button" class="pill" id="ovr-whole_portrait" onclick="setPageOverride('whole_portrait')" title="强制将本页作为 1 张完整竖屏输出，不拆栏也不切分（适合复杂整版架构图/公式推导）">🔒 本页强制整页不切分</button>
+          <button type="button" class="pill" id="ovr-whole_landscape" onclick="setPageOverride('whole_landscape')" title="强制将本页顺时针旋转 90° 横置满屏输出（适合超宽大表或横向流程图）">🔄 本页旋转90°横置满屏</button>
+          <button type="button" class="pill" id="ovr-skip" onclick="setPageOverride('skip')" title="导出整本书时直接剔除跳过本页（适合空白页、广告页或无需阅读的附录页）">🚫 导出时剔除跳过本页</button>
+        </div>
+        <div id="activeOverridesWrap" style="display:none;align-items:center;gap:5px;flex-wrap:wrap;font-size:11px;">
+          <span style="color:#fbbf24;font-weight:600;">📌 已设单页例外：</span>
+          <div id="activeOverridesPills" style="display:flex;gap:4px;flex-wrap:wrap;"></div>
+          <button type="button" class="pill" style="padding:2px 6px;font-size:10px;border-color:#ef4444;color:#fca5a5;" onclick="clearAllPageOverrides()">清空全部</button>
+        </div>
+      </div>
+
+      <!-- Smart Document Table / Figure Quick-Jump Bar -->
+      <div class="highlights-bar" id="highlightsBar" style="display:none;">
+        <span class="hl-label">📑 图表/关键页一键直达：</span>
+        <div id="highlightsList" style="display:flex;gap:5px;align-items:center;"></div>
+      </div>
+    </div>
+
+    <div class="preview-grid">
+      <div id="previewErrorNotice" role="alert" style="display:none;grid-column:1/-1;padding:12px 16px;border:1px solid #ef4444;border-radius:10px;background:rgba(239,68,68,0.12);color:#fecaca;"></div>
+      <!-- Left: Source PDF with Interactive Slice Hotspots -->
+      <div class="preview-card">
+        <div class="preview-card-header">
+          <div>
+            <h3>原版 PDF 版面解构 <span style="font-size:11.5px;color:#38bdf8;font-weight:normal;">(点击图中任意 #编号 即可跳到右侧对应屏幕)</span></h3>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <div class="legend">
+              <span><i class="dot" style="background:#2563eb"></i>通栏/大表</span>
+              <span><i class="dot" style="background:#059669"></i>左栏</span>
+              <span><i class="dot" style="background:#d97706"></i>右栏</span>
+              <span><i class="dot" style="background:#0ea5e9"></i>旋转扶正图</span>
+            </div>
+            <button class="btn btn-sm" onclick="openLightbox(document.getElementById('sourcePreviewImg').src, '原版 PDF 第 ' + (currentPage+1) + ' 页版面拆解大图', 'source', 0)">🔍 放大原图</button>
+          </div>
+        </div>
+        <div class="source-stage">
+          <div class="source-img-container" id="sourceContainer">
+            <img id="sourcePreviewImg" src="" alt="Source Annotated Preview" onclick="openLightbox(this.src, '原版 PDF 第 ' + (currentPage+1) + ' 页版面拆解大图', 'source', 0)">
+            <div id="sliceHotspotsLayer"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: KPW6 Simulator (Single 1:1 Large Mode + Multi-Screen Grid Mode) -->
+      <div class="preview-card">
+        <div class="preview-card-header">
+          <div>
+            <h3>KPW6 签名版 (7 英寸 1264×1680) 目标版式预览</h3>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <div class="view-tabs">
+              <button class="view-tab active" id="tabSingleView" onclick="setRightViewMode('single')">📱 单屏大图精看</button>
+              <button class="view-tab" id="tabGridView" onclick="setRightViewMode('grid')">🪟 本页多屏平铺</button>
+            </div>
+            <button class="btn btn-sm" onclick="zoomCurrentKpw6Screen()">🔍 高清放大镜</button>
+          </div>
+        </div>
+
+        <!-- Mode A: Single 1:1 Large Simulator -->
+        <div class="single-sim-stage" id="singleSimStage">
+          <div class="screen-Subtabs">
+            <div class="screen-pills" id="screenSelectorPills"></div>
+            <div style="display:flex;gap:6px;">
+              <button class="btn btn-sm" onclick="stepKpw6Screen(-1)" title="快捷键：← 左方向键">◀ 上一屏</button>
+              <button class="btn btn-sm btn-primary" onclick="stepKpw6Screen(1)" title="快捷键：→ 右方向键">下一屏 ▶</button>
+            </div>
+          </div>
+
+          <div id="skipPageNotice" style="display:none;width:100%;max-width:520px;background:rgba(239,68,68,0.14);border:2px dashed #ef4444;border-radius:14px;padding:36px 20px;text-align:center;color:#fca5a5;">
+            <div style="font-size:28px;margin-bottom:8px;">🚫</div>
+            <h4 style="font-size:15px;color:#fecaca;margin-bottom:6px;">本页已设为【导出时剔除跳过】</h4>
+            <p style="font-size:12px;color:#cbd5e1;margin-bottom:14px;">生成最终电子书时将自动略过第 <span id="skipPageNumText">1</span> 页，不占用 KPW6 屏幕与文件体积。</p>
+            <button type="button" class="btn btn-sm btn-primary" onclick="setPageOverride('auto')">↩️ 恢复本页正常排版</button>
+          </div>
+
+          <div class="kpw6-large-bezel" id="singleKpw6Bezel">
+            <img id="singleKpw6Img" src="" alt="KPW6 1:1 Screen"
+                 title="点击加载更高分辨率的预览图层"
+                 onclick="zoomCurrentKpw6Screen()">
+          </div>
+          <p style="font-size:11.5px;color:var(--muted);text-align:center;">
+            💡 提示：支持键盘 <strong>← / →</strong> 逐屏翻阅（翻完本页最后一屏自动进入下一页）。点击屏幕可加载更高分辨率图层；扫描源的细节仍受原始图像清晰度限制。
+          </p>
+        </div>
+
+        <!-- Mode B: Multi-Screen Large Grid -->
+        <div class="kpw6-screens-grid" id="kpw6ScreensContainer" style="display:none;">
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="loading-badge" id="loadingBadge">⏳ 正在渲染预览画面...</div>
+
+<!-- Fullscreen HD Lightbox Modal -->
+<div class="lightbox-overlay" id="lightboxModal" onclick="if(event.target===this) closeLightbox()">
+  <div class="lightbox-header">
+    <div>
+      <strong id="lightboxTitle" style="font-size:14px;">🔍 高清细节放大镜</strong>
+      <span id="lightboxHdBadge" style="margin-left:10px;font-size:11.5px;padding:3px 8px;border-radius:999px;background:rgba(16,185,129,0.2);color:#6ee7b7;border:1px solid #10b981;">✨ 正在加载高清图层...</span>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button class="btn btn-sm" onclick="setLightboxZoom(920)">1.0x 适合窗口</button>
+      <button class="btn btn-sm" onclick="setLightboxZoom(1380)">1.5x 放大</button>
+      <button class="btn btn-sm" onclick="setLightboxZoom(1920)">2.2x 超清细节</button>
+      <button class="btn btn-sm" onclick="setLightboxZoom(2500)">3.0x 显微镜级</button>
+      <button class="btn btn-sm btn-primary" onclick="closeLightbox()">✖ 关闭 (Esc)</button>
+    </div>
+  </div>
+  <div class="lightbox-body" onclick="if(event.target===this) closeLightbox()">
+    <img id="lightboxImg" src="" style="width:1100px;max-width:none;" alt="Zoomed Preview">
+  </div>
+</div>
+
+<script>window.__KPW6_CSRF_TOKEN__ = "__KPW6_CSRF_TOKEN__";</script>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -11,7 +11,7 @@ import sys
 import threading
 import warnings
 
-from conversion_runner import cancel_all_conversions
+from kpw6_studio.worker.conversion import cancel_all_conversions
 
 MAX_COVER_PIXELS = 25_000_000
 
@@ -49,7 +49,7 @@ def _validate_cover(path):
 def _decode(value):
     if isinstance(value, dict):
         if set(value) == {'__process_options__'}:
-            from pdf_engine import ProcessOptions
+            from kpw6_studio.engine import ProcessOptions
             return ProcessOptions(**value['__process_options__'])
         return {key: _decode(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -58,13 +58,13 @@ def _decode(value):
 
 
 def _operation(name, args, kwargs):
-    import pdf_engine
+    from kpw6_studio import engine as pdf_engine
     if name == 'validate_pdf':
         return _validate_pdf(*args, **kwargs)
     if name == 'validate_cover':
         return _validate_cover(*args, **kwargs)
     if name == 'generate_demo_pdfs':
-        from sample_generator import generate_demo_pdfs
+        from kpw6_studio.samples import generate_demo_pdfs
         return generate_demo_pdfs(*args, **kwargs)
     if name == 'inspect_pdf':
         path, options = args
@@ -85,7 +85,7 @@ def run_worker():
     # main thread before the owner-pipe reader starts. Later RPC imports are
     # cached; diagnostics still stay outside the JSON result stream.
     with contextlib.redirect_stdout(sys.stderr):
-        import pdf_engine
+        from kpw6_studio import engine as pdf_engine
 
     requests = queue.Queue()
     stop_requested = threading.Event()

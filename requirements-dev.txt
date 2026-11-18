@@ -1,4 +1,0 @@
--r requirements.txt
-pyinstaller>=6.12,<7
-packaging>=24.2,<27
-psutil>=6,<8

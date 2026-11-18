@@ -8,12 +8,17 @@ import unittest
 import xml.etree.ElementTree as ET
 import zipfile
 
+import sys
 import numpy as np
 import pymupdf as fitz
 from PIL import Image
 
-import pdf_engine as engine
-import sample_generator
+SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from kpw6_studio import engine
+from kpw6_studio import samples as sample_generator
 
 
 class ReleaseEngineTests(unittest.TestCase):

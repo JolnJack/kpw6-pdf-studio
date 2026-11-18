@@ -19,6 +19,9 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 
 class PackagingRegressions(unittest.TestCase):
@@ -29,24 +32,25 @@ class PackagingRegressions(unittest.TestCase):
 
     def load_script(self, name):
         path = ROOT / "packaging" / name
-        self.assertTrue(path.is_file(), f"Missing release entry point: {path.name}")
+        self.assertTrue(path.is_file(), f"Missing release entry point: {path}")
         spec = util.spec_from_file_location("kpw6_test_" + path.stem, path)
         module = util.module_from_spec(spec)
-        with patch.object(sys, "path", [str(path.parent), *sys.path]):
+        with patch.object(sys, "path", [str(path.parent), str(ROOT / "packaging"), *sys.path]):
             spec.loader.exec_module(module)
         return module
 
     def source_fixture(self):
         source = self.root / "source"
-        source.mkdir()
+        (source / "docs").mkdir(parents=True)
+        (source / "src" / "kpw6_studio").mkdir(parents=True)
         (source / "LICENSE").write_text("AGPL source fixture\n")
-        (source / "THIRD_PARTY_NOTICES.md").write_text("Third-party notices fixture\n")
-        (source / "requirements.txt").write_text("")
-        (source / "app.py").write_text("print('source snapshot')\n")
+        (source / "docs" / "THIRD_PARTY_NOTICES.md").write_text("Third-party notices fixture\n")
+        (source / "pyproject.toml").write_text('[project]\nname = "fixture"\ndependencies = []\n')
+        (source / "src" / "kpw6_studio" / "__main__.py").write_text("print('source snapshot')\n")
         return source
 
     def test_windows_launcher_target_exists_in_prepared_distribution(self):
-        builder = self.load_script("build_windows.py")
+        builder = self.load_script("windows/build_windows.py")
         backend = self.root / "backend"
         backend.mkdir()
         (backend / "KindleKPW6Studio.exe").write_bytes(b"executable fixture")
@@ -65,7 +69,7 @@ class PackagingRegressions(unittest.TestCase):
         self.assertTrue((release / "SOURCE.zip").is_file())
 
     def test_macos_assembly_has_launchable_bundle_layout_and_backend_dependencies(self):
-        builder = self.load_script("build_macos.py")
+        builder = self.load_script("macos/build_macos.py")
         backend = self.root / "backend"
         backend.mkdir()
         (backend / "KPW6StudioServer").write_bytes(b"backend fixture")
@@ -73,7 +77,7 @@ class PackagingRegressions(unittest.TestCase):
         (backend / "_internal" / "dependency.dylib").write_bytes(b"dependency fixture")
         launcher = self.root / "launcher"
         launcher.write_bytes(b"launcher fixture")
-        icon = ROOT / "packaging" / "AppIcon.icns"
+        icon = ROOT / "packaging" / "assets" / "AppIcon.icns"
         app = self.root / "release" / "KPW6 PDF Studio.app"
         builder.assemble_app(backend, launcher, app, self.source_fixture(), icon)
         with (app / "Contents" / "Info.plist").open("rb") as stream:
@@ -90,7 +94,7 @@ class PackagingRegressions(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "darwin", "Finder attributes are a macOS signing constraint")
     def test_macos_signing_metadata_is_removed_from_build_only(self):
-        builder = self.load_script("build_macos.py")
+        builder = self.load_script("macos/build_macos.py")
         app = self.root / "fixture.app"
         app.mkdir()
         binary = app / "launcher"
@@ -133,7 +137,7 @@ class PackagingRegressions(unittest.TestCase):
         support.write_release_metadata(source, release, distributions=[])
         with zipfile.ZipFile(release / "SOURCE.zip") as archive:
             names = archive.namelist()
-            self.assertTrue(any(name.endswith("/app.py") for name in names))
+            self.assertTrue(any(name.endswith("/__main__.py") for name in names))
             self.assertTrue(any(name.endswith("/LICENSE") for name in names))
             self.assertFalse(any("private.pdf" in name or "key.pem" in name or "/.git/" in name or "evidence.json" in name or name.endswith("/.env") or name.endswith("/id_rsa") for name in names), names)
         source_info = (release / "SOURCE_CODE.md").read_text(encoding="utf-8")
@@ -159,7 +163,7 @@ class PackagingRegressions(unittest.TestCase):
         support = self.load_script("release_support.py")
         from types import SimpleNamespace
         source = self.source_fixture()
-        (source / "requirements.txt").write_text("pymupdf>=1.26.4\n")
+        (source / "pyproject.toml").write_text('[project]\nname = "fixture"\ndependencies = ["pymupdf>=1.26.4"]\n')
         dists = {
             "pymupdf": SimpleNamespace(requires=["pymupdf-layout", "pillow"]),
             "pymupdf-layout": SimpleNamespace(requires=["flatbuffers"]),
@@ -171,7 +175,7 @@ class PackagingRegressions(unittest.TestCase):
         self.assertEqual(included, [dists['pillow'], dists['pymupdf']])
 
     def test_frozen_smoke_contacts_loopback_without_environment_proxy(self):
-        from local_server import LoopbackWSGIServer
+        from kpw6_studio.server.http_server import LoopbackWSGIServer
         smoke = self.load_script('smoke_frozen.py')
         def respond(environ, start_response):
             start_response('200 OK', [('Content-Type', 'text/plain')])
@@ -200,7 +204,7 @@ class PackagingRegressions(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "darwin" and shutil.which("swiftc"), "Native Swift check requires macOS")
     def test_native_health_directory_and_bounded_termination(self):
-        source = (ROOT / "packaging" / "macos_tray.swift").read_text()
+        source = (ROOT / "packaging" / "macos" / "macos_tray.swift").read_text()
         self.assertIn("func decodeServerHealth", source, "Launcher must decode the server's actual output directory")
         self.assertIn("func stopServerProcess", source, "Launcher needs a bounded synchronous stop path")
         body = source.split("let app = NSApplication.shared")[0]

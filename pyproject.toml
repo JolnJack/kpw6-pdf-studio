@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kpw6-pdf-studio"
+version = "1.0.0"
+description = "Local PDF layout, 2-column splitting, scan enhancement, and EPUB/CBZ studio for Kindle Paperwhite 6 and e-ink readers."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-only" }
+authors = [{ name = "JolnJack" }]
+keywords = ["kindle", "pdf", "epub", "cbz", "e-ink", "paperwhite", "pymupdf"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: MacOS X",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: Web Environment",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics :: Viewers",
+    "Topic :: Text Processing",
+]
+dependencies = [
+    "Flask>=3.0.0,<4",
+    "pymupdf>=1.26.4,<3",
+    "pillow>=10.1.0,<14",
+    "numpy>=1.26.0,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pyinstaller>=6.12,<7",
+    "packaging>=24.2,<27",
+    "psutil>=6,<8",
+]
+
+[project.urls]
+Homepage = "https://github.com/JolnJack/kpw6-pdf-studio"
+Repository = "https://github.com/JolnJack/kpw6-pdf-studio"
+Releases = "https://github.com/JolnJack/kpw6-pdf-studio/releases"
+Issues = "https://github.com/JolnJack/kpw6-pdf-studio/issues"
+
+[project.scripts]
+kpw6-studio = "kpw6_studio.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+kpw6_studio = ["web/*.html", "web/*.css", "web/*.js"]

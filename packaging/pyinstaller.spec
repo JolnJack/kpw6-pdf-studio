@@ -1,17 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
 import sys
+from PyInstaller.utils.hooks import collect_submodules
 
-project_root = Path(SPECPATH)
-sys.path.insert(0, str(project_root / 'packaging'))
+spec_dir = Path(SPECPATH).resolve()
+project_root = spec_dir.parent
+src_root = project_root / 'src'
+sys.path.insert(0, str(spec_dir))
+sys.path.insert(0, str(src_root))
+
 from release_support import FROZEN_EXCLUDES, prune_frozen_backend, prune_pyinstaller_toc, write_release_metadata
 
 a = Analysis(
-    [str(project_root / 'app.py')],
-    pathex=[str(project_root)],
+    [str(src_root / 'kpw6_studio' / '__main__.py')],
+    pathex=[str(src_root)],
     binaries=[],
-    datas=[],
-    hiddenimports=['pdf_service', 'pdf_worker', 'conversion_runner'],
+    datas=[(str(src_root / 'kpw6_studio' / 'web'), 'kpw6_studio/web')],
+    hiddenimports=collect_submodules('kpw6_studio'),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -1,33 +1,35 @@
-# Python virtual environments & bytecode
-.venv/
-venv/
+# Python bytecode & packaging
 __pycache__/
 *.py[cod]
 *$py.class
-
-# macOS & editor files
-.DS_Store
-.AppleDouble
-.LSOverride
-*.swp
-.idea/
-.vscode/
-
-# Build & bundle artifacts
+*.egg-info/
+src/*.egg-info/
+.eggs/
 build/
 dist/
-*.dmg
-*.app/
-*.zip
-packaging/AppIcon.iconset/
 
-# Runtime data & personal PDFs
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Runtime & user workspace directories
 uploads/
 outputs/
 samples/
+work/
 
-# Release packaging & seller assets (kept local only)
-xianyu_release/
-packaging/make_promo_and_docs.py
-packaging/assemble_release.py
-启动_KPW6_PDF优化工作台.command
+# Test & IDE caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.DS_Store
+packaging/assets/AppIcon.iconset/
+
+# Secrets & local overrides
+.env
+*.pem
+*.key
+*.p12
+*.pfx

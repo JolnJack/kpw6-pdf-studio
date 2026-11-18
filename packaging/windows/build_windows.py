@@ -2,16 +2,20 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import zipfile
 
+PACKAGING_DIR = Path(__file__).resolve().parents[1]
+ROOT = PACKAGING_DIR.parent
+if str(PACKAGING_DIR) not in sys.path:
+    sys.path.insert(0, str(PACKAGING_DIR))
+
 from release_support import FROZEN_EXCLUDES, prune_frozen_backend, write_release_metadata
 
-
-ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = "KindleKPW6Studio"
 BATCH_NAME = "双击启动_Kindle精排大师.bat"
 
@@ -53,14 +57,22 @@ def main():
         parser.error("A Windows executable must be built on Windows")
     work = args.work_dir.resolve()
     work.mkdir(parents=True, exist_ok=True)
-    command = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--console",
-               "--name", APP_NAME, "--icon", str(ROOT / "packaging" / "app_icon.ico"),
-               "--distpath", str(work / "dist"), "--workpath", str(work / "build"), "--specpath", str(work)]
+    src_root = ROOT / "src"
+    web_dir = src_root / "kpw6_studio" / "web"
+    command = [
+        sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--console",
+        "--name", APP_NAME,
+        "--icon", str(PACKAGING_DIR / "assets" / "app_icon.ico"),
+        "--paths", str(src_root),
+        "--add-data", f"{web_dir}{os.pathsep}kpw6_studio/web",
+        "--collect-submodules", "kpw6_studio",
+        "--distpath", str(work / "dist"),
+        "--workpath", str(work / "build"),
+        "--specpath", str(work),
+    ]
     for module in FROZEN_EXCLUDES:
         command += ["--exclude-module", module]
-    for module in ("pdf_service", "pdf_worker", "conversion_runner"):
-        command += ["--hidden-import", module]
-    subprocess.run(command + [str(ROOT / "app.py")], cwd=ROOT, check=True)
+    subprocess.run(command + [str(src_root / "kpw6_studio" / "__main__.py")], cwd=ROOT, check=True)
     release = assemble_distribution(work / "dist" / APP_NAME, args.output_dir.resolve())
     if args.zip_output:
         zip_out = archive_distribution(release, args.zip_output.resolve())

@@ -5,8 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const test = require('node:test');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'app.py'), 'utf8');
-const script = source.split('<script>')[1].split('</script>')[0];
+const script = fs.readFileSync(path.join(__dirname, '..', 'src', 'kpw6_studio', 'web', 'app.js'), 'utf8');
 
 function harness() {
   const elements = new Map();

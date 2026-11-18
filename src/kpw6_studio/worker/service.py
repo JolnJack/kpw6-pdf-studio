@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 
-from conversion_runner import stop_process_tree
+from kpw6_studio.worker.conversion import stop_process_tree
 
 
 def _encode(value):
@@ -47,12 +47,16 @@ class PdfService:
             self._process = None
         if stale is not None:
             self._dispose(stale)
+        child_env = os.environ.copy()
         if getattr(sys, 'frozen', False):
             command = [sys.executable, '--pdf-worker']
         else:
-            command = [sys.executable, str(Path(__file__).with_name('pdf_worker.py'))]
+            src_dir = str(Path(__file__).resolve().parents[2])
+            existing_pp = child_env.get('PYTHONPATH', '')
+            child_env['PYTHONPATH'] = src_dir + (os.pathsep + existing_pp if existing_pp else '')
+            command = [sys.executable, '-m', 'kpw6_studio.worker.protocol']
         options = {'stdin': subprocess.PIPE, 'stdout': subprocess.PIPE,
-                   'encoding': 'utf-8', 'errors': 'strict', 'bufsize': 1}
+                   'encoding': 'utf-8', 'errors': 'strict', 'bufsize': 1, 'env': child_env}
         if os.name == 'nt':
             options['creationflags'] = subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, 'CREATE_NO_WINDOW', 0)
         else:
@@ -97,10 +101,16 @@ class PdfService:
         with self._lock:
             process = self._start()
             try:
-                process.stdin.write(message + '\n')
-                process.stdin.flush()
+                try:
+                    process.stdin.write(message + '\n')
+                    process.stdin.flush()
+                except (OSError, ValueError) as exc:
+                    raise OSError('worker stdin closed') from exc
                 while True:
-                    line = process.stdout.readline()
+                    try:
+                        line = process.stdout.readline()
+                    except (OSError, ValueError) as exc:
+                        raise OSError('worker stdout closed') from exc
                     if not line:
                         if self._consume_cancel_flag(process):
                             self._dispose(process)
@@ -135,7 +145,13 @@ class PdfService:
                 return False
             self._cancel_requested = True
             self._process = None
-        self._dispose(process)
+        if self._lock.acquire(blocking=False):
+            try:
+                self._dispose(process)
+            finally:
+                self._lock.release()
+        else:
+            stop_process_tree(process, timeout=3.5)
         return True
 
     def close(self):

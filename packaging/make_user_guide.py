@@ -39,7 +39,7 @@ def _write_block(page: fitz.Page, font: fitz.Font, y: float, text: str, *,
     return y + used_h
 
 
-def generate_user_guide(output_path: Path = ROOT / "docs" / "使用说明.pdf") -> Path:
+def generate_user_guide(output_path: Path = ROOT / "dist" / "Guide.pdf") -> Path:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     font = fitz.Font("cjk")
@@ -173,7 +173,7 @@ def generate_user_guide(output_path: Path = ROOT / "docs" / "使用说明.pdf") 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=ROOT / "docs" / "使用说明.pdf")
+    parser.add_argument("--output", type=Path, default=ROOT / "dist" / "Guide.pdf")
     args = parser.parse_args()
     out = generate_user_guide(args.output)
     print(f"Generated user guide PDF: {out} ({out.stat().st_size} bytes)")

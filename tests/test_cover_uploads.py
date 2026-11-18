@@ -12,6 +12,10 @@ import zlib
 
 from PIL import Image
 
+SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
 
 def image_bytes(fmt="PNG"):
     buf = io.BytesIO()
@@ -25,7 +29,7 @@ class CoverUploadRegressions(unittest.TestCase):
         cls.data = tempfile.TemporaryDirectory()
         cls.module_name = "_kpw6_cover_upload_test_app"
         spec = importlib.util.spec_from_file_location(
-            cls.module_name, Path(__file__).resolve().parents[1] / "app.py")
+            cls.module_name, SRC_ROOT / "kpw6_studio" / "server" / "web_app.py")
         cls.module = importlib.util.module_from_spec(spec)
         sys.modules[cls.module_name] = cls.module
         with patch.dict(os.environ, {"KPW6_DATA_DIR": cls.data.name}):

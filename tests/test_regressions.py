@@ -9,10 +9,15 @@ import unittest
 import xml.etree.ElementTree as ET
 import zipfile
 
+import sys
 import numpy as np
 import pymupdf as fitz
 
-import pdf_engine as engine
+SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from kpw6_studio import engine
 
 
 def make_pdf(path, label="BOOK", rotation=0, pages=1, diagram=False):
@@ -122,8 +127,8 @@ class ApiRegressions(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory()
         cls.old_data_dir = os.environ.get("KPW6_DATA_DIR")
         os.environ["KPW6_DATA_DIR"] = cls.temp.name
-        import app
-        cls.module = app
+        from kpw6_studio.server import web_app
+        cls.module = web_app
         cls.module.app.config["TESTING"] = True
 
     @classmethod

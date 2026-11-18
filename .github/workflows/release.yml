@@ -1,0 +1,218 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Run regressions
+        run: |
+          python -u -m unittest discover -s tests -v
+          node --test tests/preview_race.test.cjs tests/frontend_release.test.cjs
+      - name: Build Windows distribution and ZIP
+        run: python packaging/windows/build_windows.py --zip-output dist/Windows.zip
+      - name: Verify bundle hygiene and manifest provenance
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, pathlib
+          rel = pathlib.Path('dist/Release')
+          internal = rel / 'KindleKPW6Studio' / '_internal'
+          assert not (internal / 'pymupdf' / 'layout').exists(), 'Unused ONNX layout models must be pruned'
+          assert not (internal / 'pymupdf' / 'mupdf-devel').exists(), 'Unused C++ headers must be pruned'
+          manifest = json.loads((rel / 'RELEASE_MANIFEST.json').read_text(encoding='utf-8'))
+          assert manifest['base_commit'] == os.environ['GITHUB_SHA'], manifest
+          assert not manifest['working_tree_modified'], manifest
+          assert pathlib.Path('dist/Windows.zip').is_file()
+          PY
+      - name: Smoke-test frozen executable
+        run: python packaging/smoke_frozen.py dist/Release/KindleKPW6Studio/KindleKPW6Studio.exe --report build/frozen-smoke.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: dist/Windows.zip
+          if-no-files-found: error
+
+  build-macos:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            asset: Mac-M.dmg
+          - runner: macos-15-intel
+            arch: x86_64
+            asset: Mac-Intel.dmg
+    env:
+      EXPECTED_ARCH: ${{ matrix.arch }}
+      ASSET_NAME: ${{ matrix.asset }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Confirm native runner architecture
+        run: python -c 'import os, platform; assert platform.machine() == os.environ["EXPECTED_ARCH"], platform.machine()'
+      - name: Install dependencies
+        run: |
+          python -m pip install --only-binary=:all: "pymupdf>=1.26.4,<3" "pillow>=10.1.0,<14" "numpy>=1.26.0,<3" "Flask>=3.0.0,<4" "pyinstaller>=6.12,<7" "packaging>=24.2,<27" "psutil>=6,<8"
+          python -m pip install --no-deps -e .
+      - name: Run regressions
+        run: |
+          python -u -m unittest discover -s tests -v
+          node --test tests/preview_race.test.cjs tests/frontend_release.test.cjs
+      - name: Build signed app archive and DMG
+        run: |
+          python packaging/macos/build_macos.py
+          python packaging/macos/build_dmg.py --app-zip "dist/macos/KPW6-PDF-Studio-${EXPECTED_ARCH}.zip" --output "dist/macos/${ASSET_NAME}"
+      - name: Verify extracted app, architectures, and manifest provenance
+        shell: bash
+        run: |
+          ditto -x -k "dist/macos/KPW6-PDF-Studio-${EXPECTED_ARCH}.zip" "${RUNNER_TEMP}/kpw6-verify"
+          codesign --verify --deep --strict "${RUNNER_TEMP}/kpw6-verify/KPW6 PDF Studio.app"
+          python - <<'PY'
+          import json, os, pathlib, plistlib, subprocess
+          app = pathlib.Path(os.environ['RUNNER_TEMP']) / 'kpw6-verify' / 'KPW6 PDF Studio.app'
+          expected = os.environ['EXPECTED_ARCH']
+          internal = app / 'Contents/Resources/server/_internal'
+          assert not (internal / 'pymupdf/layout').exists(), 'Unused ONNX layout models must be pruned'
+          assert not (internal / 'pymupdf/mupdf-devel').exists(), 'Unused C++ headers must be pruned'
+          magic = {b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf',
+                   b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca',
+                   b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca'}
+          binaries = {}
+          for path in app.rglob('*'):
+              if path.is_symlink() or not path.is_file():
+                  continue
+              with path.open('rb') as stream:
+                  if stream.read(4) not in magic:
+                      continue
+              arches = subprocess.check_output(['lipo', '-archs', str(path)], text=True).split()
+              assert expected in arches, (path, arches)
+              binaries[str(path.relative_to(app))] = arches
+          assert 'Contents/MacOS/KPW6StudioLauncher' in binaries
+          assert 'Contents/Resources/server/KPW6StudioServer' in binaries
+          info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+          manifest = json.loads((app / 'Contents/Resources/RELEASE_MANIFEST.json').read_text(encoding='utf-8'))
+          assert manifest['base_commit'] == os.environ['GITHUB_SHA'], manifest
+          assert not manifest['working_tree_modified'], manifest
+          print(f"Verified {len(binaries)} native binaries for {expected}; macOS {info['LSMinimumSystemVersion']}+")
+          PY
+      - name: Smoke-test frozen macOS server
+        run: python packaging/smoke_frozen.py "${RUNNER_TEMP}/kpw6-verify/KPW6 PDF Studio.app/Contents/Resources/server/KPW6StudioServer" --report build/frozen-smoke.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: dist/macos/${{ matrix.asset }}
+          if-no-files-found: error
+
+  build-guide:
+    name: User Guide PDF
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install runtime dependencies
+        run: python -m pip install .
+      - name: Generate subsetted Chinese user guide PDF
+        run: python packaging/make_user_guide.py --output dist/Guide.pdf
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-guide
+          path: dist/Guide.pdf
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-macos, build-guide]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Verify assembled release assets
+        run: |
+          ls -lh release-assets
+          for f in Windows.zip Mac-Intel.dmg Mac-M.dmg Guide.pdf; do
+            test -s "release-assets/$f"
+          done
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          cat > release-notes.md <<EOF
+          提供 Windows、Intel Mac 和 Apple M 系列 Mac 原生离线安装包，以及中文 PDF 使用说明（无需安装 Python 或 Node.js）。
+
+          ## 下载与安装
+
+          | 你的电脑 | 下载文件 | 安装与启动 |
+          | --- | --- | --- |
+          | **Windows**（64 位） | \`Windows.zip\`（标签：\`Windows版.zip\`） | 完整解压后双击 \`双击启动_Kindle精排大师.bat\`，保留全部文件 |
+          | **M 系列 Mac**（Apple Silicon） | \`Mac-M.dmg\`（标签：\`Mac版（M系列）.dmg\`） | 打开 DMG，将 \`KPW6 PDF Studio\` 拖入“应用程序” |
+          | **Intel Mac** | \`Mac-Intel.dmg\`（标签：\`Mac版（Intel）.dmg\`） | 打开 DMG，将 \`KPW6 PDF Studio\` 拖入“应用程序” |
+          | **中文使用说明** | \`Guide.pdf\`（标签：\`使用说明.pdf\`） | 三页图文步骤与常见问题速查 |
+
+          > 两个 Mac 版本均要求 **macOS 14** 或更新系统。当前 Mac 安装包采用本地签名（尚未完成 Apple Developer ID 公证），首次打开若弹出系统安全提示，可在「系统设置 → 隐私与安全性」底部点击「KPW6 PDF Studio」旁的【仍要打开】，或在终端执行 \`xattr -cr "/Applications/KPW6 PDF Studio.app"\`。
+
+          ## 开源合规与构建溯源
+
+          本项目遵循 **AGPL-3.0-only** 开源许可；每个安装包内均附带完全一致的对应源码快照（\`SOURCE.zip\`）、许可证（\`LICENSE\`）、第三方组件许可闭包（\`THIRD_PARTY_LICENSES/\`）及构建清单（\`RELEASE_MANIFEST.json\`）。
+
+          - **统一构建提交**：\`${GITHUB_SHA}\`
+          - **自动化构建与冒烟测试流水线**：${RUN_URL}
+          EOF
+
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              "release-assets/Windows.zip#Windows版.zip" \
+              "release-assets/Mac-Intel.dmg#Mac版（Intel）.dmg" \
+              "release-assets/Mac-M.dmg#Mac版（M系列）.dmg" \
+              "release-assets/Guide.pdf#使用说明.pdf" \
+              --clobber -R "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --notes-file release-notes.md --latest
+          else
+            gh release create "$TAG" \
+              "release-assets/Windows.zip#Windows版.zip" \
+              "release-assets/Mac-Intel.dmg#Mac版（Intel）.dmg" \
+              "release-assets/Mac-M.dmg#Mac版（M系列）.dmg" \
+              "release-assets/Guide.pdf#使用说明.pdf" \
+              -R "$GITHUB_REPOSITORY" \
+              --title "${TAG} · Windows / Apple Silicon Mac / Intel Mac" \
+              --notes-file release-notes.md \
+              --latest
+          fi
